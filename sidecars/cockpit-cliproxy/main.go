@@ -2253,6 +2253,9 @@ func (s *cockpitSelector) Pick(ctx context.Context, provider, model string, opts
 		if !authAvailable(auth, model, now) {
 			continue
 		}
+		if authModelExcluded(s.manifest, auth, model) {
+			continue
+		}
 		if reason := quotaReserveBlockReasonWithState(s.accountForAuth(auth), s.quota, now); reason != "" {
 			quotaReserveReasons = append(quotaReserveReasons, reason)
 			continue
@@ -3574,6 +3577,9 @@ func readManifestCodexTokenAuth(account *accountSpec, authDir, path string) (*co
 	if proxyURL := firstMetadataString(metadata, "proxy_url", "proxy-url"); proxyURL != "" {
 		auth.ProxyURL = proxyURL
 	}
+	if excluded := extractExcludedModelsFromMetadataMap(metadata); len(excluded) > 0 {
+		auth.Attributes["excluded_models"] = strings.Join(excluded, ",")
+	}
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
 }
@@ -3808,7 +3814,9 @@ func excludedModelsForAuth(m *manifest, auth *coreauth.Auth) []string {
 	if auth != nil {
 		add(extractExcludedModelsFromMetadataMap(auth.Metadata))
 		if auth.Attributes != nil {
-			add(strings.Split(auth.Attributes["excluded_models"], ","))
+			if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
+				add(strings.Split(value, ","))
+			}
 		}
 	}
 	if len(seen) == 0 {
