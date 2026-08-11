@@ -64,11 +64,15 @@ export type TraeUsage = {
   payAsYouGoOpen?: boolean | null;
   payAsYouGoUsd?: number | null;
   usageExhausted?: boolean | null;
-  /** CN 速通额度模型（premium_model_fast_*），与国际站 USD basic 额度不同 */
-  usageModel?: 'usd' | 'fast_request' | 'unknown';
+  /** CN 额度模型：usd 美元，fast_request 速通，credits 积分，unknown 未知 */
+  usageModel?: 'usd' | 'fast_request' | 'credits' | 'unknown';
   fastRequestAvailable?: number | null;
   fastRequestLimit?: number | null;
   fastRequestUsed?: number | null;
+  creditsAvailable?: number | null;
+  creditsLimit?: number | null;
+  creditsUsed?: number | null;
+  isCreditsBilling?: boolean | null;
   /** entitlement detail 中的月度快通道次数（无 pack 速通汇总时的兜底展示） */
   fastRequestPerMonth?: number | null;
   canGetExpressStatus?: number | null;
@@ -285,7 +289,64 @@ function getUsagePacks(rawUsage: unknown): Record<string, unknown>[] {
 function isVisibleActivePack(pack: Record<string, unknown>): boolean {
   if (toBoolean(pack.is_hide) === true) return false;
   const status = pickFirstNumber(pack, ['status', 'entitlement_status']);
-  return status == null || status === 1;
+  return status == null || status === 1 || status === 0;
+}
+
+function getCreditsUsage(rawUsage: unknown): {
+  available: number;
+  limit: number;
+  used: number;
+  isCreditsBilling: boolean;
+} | null {
+  const roots = collectUsageRoots(rawUsage);
+  const isCreditsBilling = roots.some(
+    (root) => toBoolean(root.is_credits_billing) === true,
+  );
+
+  const packs = getUsagePacks(rawUsage).filter(isVisibleActivePack);
+
+  let totalLimit = 0;
+  let totalUsed = 0;
+  let hasInfiniteLimit = false;
+  let hasCreditsEvidence = isCreditsBilling;
+
+  for (const pack of packs) {
+    const quota = getPackQuota(pack);
+    const usage = getPackUsage(pack);
+    const entitlementBase = pickNestedObject(pack, ['entitlement_base_info']);
+    const baseQuota = pickNestedObject(entitlementBase, ['quota']);
+
+    const creditLimit =
+      pickFirstNumber(quota, ['credits_limit', 'credit_limit']) ??
+      pickFirstNumber(baseQuota, ['credits_limit', 'credit_limit']);
+    const creditUsed =
+      pickFirstNumber(usage, ['credits_amount', 'credit_amount', 'used_credits_amount']) ?? 0;
+
+    if (creditLimit != null) {
+      hasCreditsEvidence = true;
+      if (creditLimit === -1) {
+        hasInfiniteLimit = true;
+      } else if (creditLimit > 0) {
+        totalLimit += creditLimit;
+      }
+    }
+
+    if (
+      usage != null &&
+      (Object.prototype.hasOwnProperty.call(usage, 'credits_amount') ||
+        Object.prototype.hasOwnProperty.call(usage, 'credit_amount'))
+    ) {
+      hasCreditsEvidence = true;
+    }
+
+    totalUsed += creditUsed;
+  }
+
+  if (!hasCreditsEvidence && !isCreditsBilling) return null;
+
+  const limit = hasInfiniteLimit ? -1 : totalLimit;
+  const available = limit === -1 ? -1 : Math.max(limit - totalUsed, 0);
+  return { available, limit, used: totalUsed, isCreditsBilling };
 }
 
 function getFastRequestUsage(rawUsage: unknown): {
@@ -509,11 +570,25 @@ function getUsageStatusFromPackList(
     identityFromProductType(selectedProductType) ??
     'Free';
   const derivedPercent = totalUsd > 0 ? (spentUsd / totalUsd) * 100 : 0;
-  const fastUsage = preferCn ? getFastRequestUsage(rawUsage) : null;
+  const creditsUsage = preferCn ? getCreditsUsage(rawUsage) : null;
+  const fastUsage = preferCn && !creditsUsage ? getFastRequestUsage(rawUsage) : null;
 
   let usedPercent: number | null = Math.max(0, Math.min(100, Math.round(derivedPercent)));
   let usageModel: TraeUsage['usageModel'] = 'usd';
-  if (preferCn && fastUsage) {
+
+  if (preferCn && creditsUsage) {
+    usageModel = 'credits';
+    if (creditsUsage.limit === -1) {
+      usedPercent = 0;
+    } else if (creditsUsage.limit > 0) {
+      usedPercent = Math.max(
+        0,
+        Math.min(100, Math.round((creditsUsage.used / creditsUsage.limit) * 100)),
+      );
+    } else {
+      usedPercent = null;
+    }
+  } else if (preferCn && fastUsage) {
     usageModel = 'fast_request';
     if (fastUsage.limit === -1) {
       usedPercent = 0;
@@ -532,8 +607,8 @@ function getUsageStatusFromPackList(
 
   return {
     usedPercent,
-    spentUsd: usageModel === 'fast_request' ? null : spentUsd,
-    totalUsd: usageModel === 'fast_request' ? null : totalUsd,
+    spentUsd: usageModel === 'fast_request' || usageModel === 'credits' ? null : spentUsd,
+    totalUsd: usageModel === 'fast_request' || usageModel === 'credits' ? null : totalUsd,
     resetAt: toUnixSeconds(resetAtRaw),
     basicQuota,
     basicUsage,
@@ -549,13 +624,19 @@ function getUsageStatusFromPackList(
     hasPackage,
     payAsYouGoOpen,
     payAsYouGoUsd,
-    usageExhausted: usageModel === 'fast_request'
-      ? fastUsage != null && fastUsage.limit !== -1 && fastUsage.available === 0
-      : usageExhausted,
+    usageExhausted: usageModel === 'credits'
+      ? creditsUsage != null && creditsUsage.limit !== -1 && creditsUsage.available === 0
+      : usageModel === 'fast_request'
+        ? fastUsage != null && fastUsage.limit !== -1 && fastUsage.available === 0
+        : usageExhausted,
     usageModel,
     fastRequestAvailable: fastUsage?.available ?? null,
     fastRequestLimit: fastUsage?.limit ?? null,
     fastRequestUsed: fastUsage?.used ?? null,
+    creditsAvailable: creditsUsage?.available ?? null,
+    creditsLimit: creditsUsage?.limit ?? null,
+    creditsUsed: creditsUsage?.used ?? null,
+    isCreditsBilling: creditsUsage?.isCreditsBilling ?? null,
   };
 }
 

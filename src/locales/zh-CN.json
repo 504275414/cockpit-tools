@@ -5086,6 +5086,10 @@
       "fastPerMonth": "快请求/月：{{count}}",
       "fastChannelPerMonth": "快通道: {{count}}/月",
       "fastChannelStatus": "快通道: {{status}}",
+      "creditsAvailableOfTotal": "积分可用 {{available}} / {{limit}}",
+      "creditsAvailable": "积分可用 {{credits}}",
+      "creditsUsedText": "已用积分：{{used}}",
+      "creditsActive": "积分模式",
       "freeRemainingUnknown": "免费剩余：--",
       "timesRemainingUnknown": "剩余次数：--",
       "soloParallel": "权益包: Solo 并发 {{count}}"

@@ -32,9 +32,14 @@ if (macosSdkRoot) {
 }
 const extraArgs = process.argv.slice(2);
 
-const syncResult = spawnSync('npm', ['run', 'sync-version'], {
+const isWin = process.platform === 'win32';
+const npmCmd = isWin ? 'npm.cmd' : 'npm';
+const npxCmd = isWin ? 'npx.cmd' : 'npx';
+
+const syncResult = spawnSync(npmCmd, ['run', 'sync-version'], {
   stdio: 'inherit',
   env,
+  shell: isWin,
 });
 
 if (syncResult.status !== 0) {
@@ -42,11 +47,12 @@ if (syncResult.status !== 0) {
 }
 
 const tauriResult = spawnSync(
-  'tauri',
-  ['dev', '--config', 'src-tauri/tauri.dev.conf.json', ...extraArgs],
+  npxCmd,
+  ['tauri', 'dev', '--config', 'src-tauri/tauri.dev.conf.json', ...extraArgs],
   {
     stdio: 'inherit',
     env,
+    shell: isWin,
   },
 );
 

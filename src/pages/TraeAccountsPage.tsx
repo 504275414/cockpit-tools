@@ -605,6 +605,8 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
         .includes('free');
 
       const hasUsageRaw = account.trae_usage_raw != null || account.trae_entitlement_raw != null;
+      const hasCredits =
+        usage.usageModel === 'credits' && usage.creditsAvailable != null;
       const hasFastRequest =
         usage.usageModel === 'fast_request' && usage.fastRequestAvailable != null;
       const formatFastTimes = (value: number) =>
@@ -613,11 +615,24 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
           : t('trae.quota.fastTimes', '{{count}} 次', {
               count: value,
             });
+      const formatCreditsVal = (val: number) =>
+        val.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
 
-      // CN：优先速通次数展示，无可靠剩余时不猜测（对齐社区 #1281）
+      // CN：优先积分 / 速通次数展示，无可靠剩余时不猜测（对齐社区 #1281）
       let costText: string;
       if (isCnAccount) {
-        if (hasFastRequest) {
+        if (hasCredits) {
+          if (usage.creditsLimit != null && usage.creditsLimit > 0) {
+            costText = t('trae.quota.creditsAvailableOfTotal', '积分可用 {{available}} / {{limit}}', {
+              available: formatCreditsVal(usage.creditsAvailable ?? 0),
+              limit: formatCreditsVal(usage.creditsLimit ?? 0),
+            });
+          } else {
+            costText = t('trae.quota.creditsAvailable', '积分可用 {{credits}}', {
+              credits: formatCreditsVal(usage.creditsAvailable ?? 0),
+            });
+          }
+        } else if (hasFastRequest) {
           costText = t('trae.quota.fastAvailable', '速通可用 {{times}}', {
             times: formatFastTimes(usage.fastRequestAvailable ?? 0),
           });
@@ -654,7 +669,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
       const statusTone: TraeQuotaSummary['statusTone'] = !hasUsageRaw
         ? 'unknown'
         : isCnAccount
-          ? hasFastRequest
+          ? hasCredits || hasFastRequest
             ? usage.usageExhausted
               ? 'warning'
               : 'normal'
@@ -668,7 +683,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
       const statusText = !hasUsageRaw
         ? t('trae.quota.statusUnknown', 'Status: --')
         : isCnAccount
-          ? hasFastRequest
+          ? hasCredits || hasFastRequest
             ? usage.usageExhausted
               ? t('trae.quota.statusExhaustedFree', 'Status: Usage exhausted, upgrade recommended')
               : t('trae.quota.statusSynced', '状态：已同步')
@@ -688,17 +703,23 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
             : t('trae.quota.statusNormal', 'Status: Normal');
 
       const bonusText = isCnAccount
-        ? hasFastRequest
-          ? ''
-          : (usage.fastRequestPerMonth ?? 0) > 0
-            ? t('trae.quota.fastChannelPerMonth', '快通道: {{count}}/月', {
-                count: usage.fastRequestPerMonth ?? 0,
+        ? hasCredits
+          ? usage.creditsUsed != null && usage.creditsUsed > 0
+            ? t('trae.quota.creditsUsedText', '已用积分：{{used}}', {
+                used: formatCreditsVal(usage.creditsUsed),
               })
-            : usage.canGetExpressStatus != null
-              ? t('trae.quota.fastChannelStatus', '快通道: {{status}}', {
-                  status: usage.canGetExpressStatus,
+            : t('trae.quota.creditsActive', '积分模式')
+          : hasFastRequest
+            ? ''
+            : (usage.fastRequestPerMonth ?? 0) > 0
+              ? t('trae.quota.fastChannelPerMonth', '快通道: {{count}}/月', {
+                  count: usage.fastRequestPerMonth ?? 0,
                 })
-              : t('trae.quota.bonusEmpty', 'Bonus: --')
+              : usage.canGetExpressStatus != null
+                ? t('trae.quota.fastChannelStatus', '快通道: {{status}}', {
+                    status: usage.canGetExpressStatus,
+                  })
+                : t('trae.quota.bonusEmpty', 'Bonus: --')
         : (usage.bonusUsage ?? 0) > 0
           ? t('trae.quota.bonusUsed', {
               amount: formatTraeMoney(usage.bonusUsage),
@@ -722,16 +743,18 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
             : t('trae.quota.packageAvailable', 'Package: Available')
           : t('trae.quota.packageEmpty', 'Package: --');
 
+      const isCnNoProgress = isCnAccount && !hasFastRequest && !hasCredits && usage.usageModel !== 'usd';
+
       return {
-        percentage: isCnAccount && !hasFastRequest && usage.usageModel !== 'usd' ? null : percentage,
+        percentage: isCnNoProgress ? null : percentage,
         percentageText:
-          isCnAccount && !hasFastRequest && usage.usageModel !== 'usd'
+          isCnNoProgress
             ? '--'
             : percentage == null
               ? '--'
               : `${percentage}%`,
         quotaClass: computeQuotaClass(
-          isCnAccount && !hasFastRequest && usage.usageModel !== 'usd' ? null : percentage,
+          isCnNoProgress ? null : percentage,
         ),
         costText,
         statusText,
