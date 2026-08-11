@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Экспресс: {{status}}",
       "freeRemainingUnknown": "Free ост.: --",
       "timesRemainingUnknown": "Ост.: --",
-      "soloParallel": "Пакет: Solo ×{{count}}"
+      "soloParallel": "Пакет: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Доступно кредитов {{available}} / {{limit}}",
+      "creditsAvailable": "Доступно кредитов {{credits}}",
+      "creditsUsedText": "Использовано кредитов: {{used}}",
+      "creditsActive": "Режим кредитов"
     },
     "flowNotice": {
       "title": "Руководство по аккаунту Trae (нажмите, чтобы развернуть или свернуть)",

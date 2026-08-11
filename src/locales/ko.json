@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "빠른 채널: {{status}}",
       "freeRemainingUnknown": "무료 잔여: --",
       "timesRemainingUnknown": "남은 횟수: --",
-      "soloParallel": "혜택: Solo 병렬 {{count}}"
+      "soloParallel": "혜택: Solo 병렬 {{count}}",
+      "creditsAvailableOfTotal": "사용 가능한 크레딧 {{available}} / {{limit}}",
+      "creditsAvailable": "사용 가능한 크레딧 {{credits}}",
+      "creditsUsedText": "사용된 크레딧: {{used}}",
+      "creditsActive": "크레딧 모드"
     },
     "flowNotice": {
       "title": "Trae 계정 안내 (클릭하여 펼치기/접기)",

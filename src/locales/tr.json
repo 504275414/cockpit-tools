@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Hızlı kanal: {{status}}",
       "freeRemainingUnknown": "Free kalan: --",
       "timesRemainingUnknown": "Kalan: --",
-      "soloParallel": "Paket: Solo ×{{count}}"
+      "soloParallel": "Paket: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Kullanılabilir kredi {{available}} / {{limit}}",
+      "creditsAvailable": "Kullanılabilir kredi {{credits}}",
+      "creditsUsedText": "Kullanılan kredi: {{used}}",
+      "creditsActive": "Kredi Modu"
     },
     "flowNotice": {
       "title": "Trae hesap kilavuzu (genisletmek/daraltmak icin tiklayin)",

@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Kênh nhanh: {{status}}",
       "freeRemainingUnknown": "Free còn: --",
       "timesRemainingUnknown": "Còn lại: --",
-      "soloParallel": "Gói: Solo ×{{count}}"
+      "soloParallel": "Gói: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Tín dụng khả dụng {{available}} / {{limit}}",
+      "creditsAvailable": "Tín dụng khả dụng {{credits}}",
+      "creditsUsedText": "Tín dụng đã dùng: {{used}}",
+      "creditsActive": "Chế độ tín dụng"
     },
     "flowNotice": {
       "title": "Huong dan tai khoan Trae (nhan de mo rong/thu gon)",

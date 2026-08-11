@@ -4936,7 +4936,11 @@
       "fastChannelStatus": "Saluran cepat: {{status}}",
       "freeRemainingUnknown": "Free sisa: --",
       "timesRemainingUnknown": "Sisa: --",
-      "soloParallel": "Paket: Solo ×{{count}}"
+      "soloParallel": "Paket: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Kredit tersedia {{available}} / {{limit}}",
+      "creditsAvailable": "Kredit tersedia {{credits}}",
+      "creditsUsedText": "Kredit terpakai: {{used}}",
+      "creditsActive": "Mode Kredit"
     },
     "flowNotice": {
       "title": "Panduan akun Trae (klik untuk perluas/ciutkan)",

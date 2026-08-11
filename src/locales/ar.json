@@ -4808,7 +4808,11 @@
       "fastChannelStatus": "قناة سريعة: {{status}}",
       "freeRemainingUnknown": "Free متبقي: --",
       "timesRemainingUnknown": "المتبقي: --",
-      "soloParallel": "حزمة: Solo ×{{count}}"
+      "soloParallel": "حزمة: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "الرصيد المتاح {{available}} / {{limit}}",
+      "creditsAvailable": "الرصيد المتاح {{credits}}",
+      "creditsUsedText": "الرصيد المستهلك: {{used}}",
+      "creditsActive": "وضع الرصيد"
     },
     "flowNotice": {
       "title": "دليل حساب Trae (انقر للتوسيع أو الطي)",

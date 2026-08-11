@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Szybki kanał: {{status}}",
       "freeRemainingUnknown": "Free zostało: --",
       "timesRemainingUnknown": "Zostało: --",
-      "soloParallel": "Pakiet: Solo ×{{count}}"
+      "soloParallel": "Pakiet: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Dostępne kredyty {{available}} / {{limit}}",
+      "creditsAvailable": "Dostępne kredyty {{credits}}",
+      "creditsUsedText": "Zużyte kredyty: {{used}}",
+      "creditsActive": "Tryb kredytów"
     },
     "flowNotice": {
       "title": "Przewodnik po kontach Trae (kliknij, aby rozwinac/zwinac)",

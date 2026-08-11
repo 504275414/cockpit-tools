@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Schnellkanal: {{status}}",
       "freeRemainingUnknown": "Free Rest: --",
       "timesRemainingUnknown": "Rest: --",
-      "soloParallel": "Paket: Solo ×{{count}}"
+      "soloParallel": "Paket: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Guthaben verfügbar {{available}} / {{limit}}",
+      "creditsAvailable": "Guthaben verfügbar {{credits}}",
+      "creditsUsedText": "Verbrauchtes Guthaben: {{used}}",
+      "creditsActive": "Guthabenmodus"
     },
     "flowNotice": {
       "title": "Trae-Kontoleitfaden (zum Auf- und Zuklappen klicken)",

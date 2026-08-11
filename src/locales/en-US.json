@@ -5088,7 +5088,11 @@
       "fastChannelStatus": "Express: {{status}}",
       "freeRemainingUnknown": "Free left: --",
       "timesRemainingUnknown": "Left: --",
-      "soloParallel": "Pack: Solo x{{count}}"
+      "soloParallel": "Pack: Solo x{{count}}",
+      "creditsAvailableOfTotal": "Credits available {{available}} / {{limit}}",
+      "creditsAvailable": "Credits available {{credits}}",
+      "creditsUsedText": "Credits used: {{used}}",
+      "creditsActive": "Credits Mode"
     },
     "flowNotice": {
       "title": "Trae account guide (click to expand/collapse)",

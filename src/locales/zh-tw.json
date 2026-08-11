@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "快通道: {{status}}",
       "freeRemainingUnknown": "免費剩餘：--",
       "timesRemainingUnknown": "剩餘次數：--",
-      "soloParallel": "權益包: Solo 並發 {{count}}"
+      "soloParallel": "權益包: Solo 並發 {{count}}",
+      "creditsAvailableOfTotal": "積分可用 {{available}} / {{limit}}",
+      "creditsAvailable": "積分可用 {{credits}}",
+      "creditsUsedText": "已用積分：{{used}}",
+      "creditsActive": "積分模式"
     },
     "flowNotice": {
       "title": "Trae 帳號接入說明（點擊展開/收起）",

@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Canal rápido: {{status}}",
       "freeRemainingUnknown": "Free resto: --",
       "timesRemainingUnknown": "Resto: --",
-      "soloParallel": "Pacote: Solo ×{{count}}"
+      "soloParallel": "Pacote: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Créditos disponíveis {{available}} / {{limit}}",
+      "creditsAvailable": "Créditos disponíveis {{credits}}",
+      "creditsUsedText": "Créditos usados: {{used}}",
+      "creditsActive": "Modo Crédito"
     },
     "flowNotice": {
       "title": "Guia de contas Trae (clique para expandir/recolher)",

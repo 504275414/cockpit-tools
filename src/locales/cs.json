@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "Rychlý kanál: {{status}}",
       "freeRemainingUnknown": "Free zbývá: --",
       "timesRemainingUnknown": "Zbývá: --",
-      "soloParallel": "Balíček: Solo ×{{count}}"
+      "soloParallel": "Balíček: Solo ×{{count}}",
+      "creditsAvailableOfTotal": "Dostupné kredity {{available}} / {{limit}}",
+      "creditsAvailable": "Dostupné kredity {{credits}}",
+      "creditsUsedText": "Použité kredity: {{used}}",
+      "creditsActive": "Režim kreditů"
     },
     "flowNotice": {
       "title": "Prirucka k uctu Trae (kliknutim rozbalit/sbalit)",

@@ -4761,7 +4761,11 @@
       "fastChannelStatus": "高速枠: {{status}}",
       "freeRemainingUnknown": "無料残量：--",
       "timesRemainingUnknown": "残回数：--",
-      "soloParallel": "特典: Solo 並列 {{count}}"
+      "soloParallel": "特典: Solo 並列 {{count}}",
+      "creditsAvailableOfTotal": "利用可能クレジット {{available}} / {{limit}}",
+      "creditsAvailable": "利用可能クレジット {{credits}}",
+      "creditsUsedText": "使用済みクレジット：{{used}}",
+      "creditsActive": "クレジットモード"
     },
     "flowNotice": {
       "title": "Trae アカウントガイド（クリックで展開/折りたたみ）",
