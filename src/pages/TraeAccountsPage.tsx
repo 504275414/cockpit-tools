@@ -49,6 +49,7 @@ import {
   getTraeAccountDisplayName,
   getTraeAccountPlatformId,
   getTraeLoginProvider,
+  getTraeOfficialQuotaModel,
   getTraePlanBadge,
   getTraePlanBadgeClass,
   getTraePlanDisplayName,
@@ -285,6 +286,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
 
   const {
     t,
+    locale,
     maskAccountText,
     privacyModeEnabled,
     togglePrivacyMode,
@@ -861,13 +863,116 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
     [t],
   );
 
+  const formatQuotaDateTime = useCallback(
+    (timeMs: number | null) => {
+      if (timeMs == null || !Number.isFinite(timeMs)) return null;
+      const date = new Date(timeMs);
+      if (locale && locale.startsWith('zh')) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hour = String(date.getHours()).padStart(2, '0');
+        const minute = String(date.getMinutes()).padStart(2, '0');
+        const second = String(date.getSeconds()).padStart(2, '0');
+        return `${year}年 ${month}月${day}日 ${hour}:${minute}:${second}`;
+      }
+      return date.toLocaleString('en-US', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    },
+    [locale],
+  );
+
+  const formatQuotaValNum = useCallback(
+    (val: number, unit?: string) => {
+      if (val === -1) return t('trae.quota.fastUnlimited', '无限次');
+      const numStr = val.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+      if (unit === 'fast_request') return `${numStr} 次`;
+      if (unit === 'usd') return `$${numStr}`;
+      return numStr;
+    },
+    [t],
+  );
+
+  const renderQuotaSection = useCallback(
+    (account: TraeAccount, variant: 'card' | 'table' = 'card') => {
+      const officialModel = getTraeOfficialQuotaModel(account);
+      const hasOfficialResources = officialModel.hasQuotaData && officialModel.resources.length > 0;
+
+      if (hasOfficialResources) {
+        return (
+          <div className={`trae-official-quota-list ${variant === 'table' ? 'is-table' : 'is-card'}`}>
+            {officialModel.resources.map((resource, idx) => {
+              const quotaClass = computeQuotaClass(resource.remainPercent);
+              const usedPercent = Math.max(0, Math.min(100, resource.usedPercent));
+              const usedText = formatQuotaValNum(resource.used, resource.unit);
+              const totalText = formatQuotaValNum(resource.total, resource.unit);
+              const quotaValueText =
+                resource.total === -1
+                  ? `${usedText} / ${t('trae.quota.unlimited', '无限')}`
+                  : `${usedText} / ${totalText}`;
+
+              const formattedTime = resource.isBasePackage
+                ? resource.refreshAt
+                  ? formatQuotaDateTime(resource.refreshAt)
+                  : null
+                : resource.expireAt
+                ? formatQuotaDateTime(resource.expireAt)
+                : null;
+
+              const timeText = formattedTime
+                ? resource.isBasePackage
+                  ? t('codebuddy.quotaQuery.updatedAt', '下次刷新时间：{{time}}', { time: formattedTime })
+                  : t('codebuddy.quotaQuery.expireAt', '到期时间：{{time}}', { time: formattedTime })
+                : null;
+
+              return (
+                <div key={`${account.id}-${resource.packageCode || 'pkg'}-${idx}`} className="trae-official-quota-row">
+                  <div className="quota-header">
+                    <span className="quota-label" title={resource.packageName}>
+                      {resource.packageName}
+                    </span>
+                    <span className={`quota-pct ${quotaClass}`}>{quotaValueText}</span>
+                  </div>
+                  {variant === 'card' ? (
+                    <div className="quota-bar-track">
+                      <div className={`quota-bar ${quotaClass}`} style={{ width: `${usedPercent}%` }} />
+                    </div>
+                  ) : (
+                    <div className="quota-progress-track">
+                      <div className={`quota-progress-bar ${quotaClass}`} style={{ width: `${usedPercent}%` }} />
+                    </div>
+                  )}
+                  {timeText ? (
+                    <div className="trae-official-quota-meta-wrap">
+                      <span className="trae-official-quota-meta">{timeText}</span>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        );
+      }
+
+      const quota = resolveQuotaSummary(account);
+      return renderCompactQuota(quota, variant);
+    },
+    [formatQuotaDateTime, formatQuotaValNum, renderCompactQuota, resolveQuotaSummary, t],
+  );
+
   const renderGridCards = useCallback(
     (items: TraeAccount[], groupKey?: string) =>
       items.map((account) => {
         const displayName = resolveDisplayName(account);
         const displayEmail = resolveDisplayEmail(account);
         const showDisplayEmail = displayEmail !== 'unknown' && displayEmail !== displayName;
-        const quota = resolveQuotaSummary(account);
         const planLabel = resolvePlanLabel(account);
         const planClass = getTraePlanBadgeClass(planLabel);
         const accountTags = (account.tags || []).map((tag) => tag.trim()).filter(Boolean);
@@ -943,7 +1048,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
 
             <div className="ghcp-quota-section">
               {hasQuotaData ? (
-                renderCompactQuota(quota, 'card')
+                renderQuotaSection(account, 'card')
               ) : (
                 <div className="quota-empty">{t('common.shared.quota.noData', '暂无配额数据')}</div>
               )}
@@ -1033,7 +1138,6 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
         const displayName = resolveDisplayName(account);
         const displayEmail = resolveDisplayEmail(account);
         const showDisplayEmail = displayEmail !== 'unknown' && displayEmail !== displayName;
-        const quota = resolveQuotaSummary(account);
         const planLabel = resolvePlanLabel(account);
         const planClass = getTraePlanBadgeClass(planLabel);
         const accountTags = (account.tags || []).map((tag) => tag.trim()).filter(Boolean);
@@ -1110,7 +1214,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
             </td>
             <td>
               {hasQuotaData ? (
-                renderCompactQuota(quota, 'table')
+                renderQuotaSection(account, 'table')
               ) : (
                 <div className="quota-empty">{t('common.shared.quota.noData', '暂无配额数据')}</div>
               )}

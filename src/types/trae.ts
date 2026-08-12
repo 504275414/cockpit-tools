@@ -963,3 +963,137 @@ export function getTraeUsage(account: TraeAccount): TraeUsage {
 export function hasTraeQuotaData(account: TraeAccount): boolean {
   return account.trae_usage_raw != null;
 }
+
+export interface TraeQuotaResource {
+  packageCode?: string;
+  packageName: string;
+  used: number;
+  total: number;
+  available: number;
+  usedPercent: number;
+  remainPercent: number | null;
+  expireAt: number | null;
+  refreshAt: number | null;
+  isBasePackage?: boolean;
+  isExtraPackage?: boolean;
+  unit?: 'credits' | 'fast_request' | 'usd';
+}
+
+export interface TraeOfficialQuotaModel {
+  resources: TraeQuotaResource[];
+  hasQuotaData: boolean;
+}
+
+export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuotaModel {
+  const rawUsage = account.trae_usage_raw ?? account.trae_entitlement_raw;
+  if (!rawUsage) {
+    return { resources: [], hasQuotaData: false };
+  }
+
+  const packs = getUsagePacks(rawUsage).filter(isVisibleActivePack);
+  if (packs.length === 0) {
+    return { resources: [], hasQuotaData: false };
+  }
+
+  const resources: TraeQuotaResource[] = [];
+
+  for (const pack of packs) {
+    const productType = getPackProductType(pack);
+
+    const entitlementBase = pickNestedObject(pack, ['entitlement_base_info']);
+    const baseQuota = pickNestedObject(entitlementBase, ['quota']);
+    const quota = getPackQuota(pack);
+    const usage = getPackUsage(pack);
+
+    const desc = toNonEmptyString(pack.display_desc) ?? toNonEmptyString(pack.package_name);
+    let packageName = desc ?? '套餐配额';
+    let isBasePackage = false;
+    let isExtraPackage = false;
+
+    if (productType === TRAE_PRODUCT_TYPE.FREE) {
+      packageName = desc ?? '基础体验包';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.PRO) {
+      packageName = desc ?? '专业版订阅';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.PRO_PLUS || productType === TRAE_PRODUCT_TYPE.PRO_PLUS_PACK) {
+      packageName = desc ?? 'Pro+ 订阅';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.ULTRA) {
+      packageName = desc ?? 'Ultra 订阅';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.LITE) {
+      packageName = desc ?? 'Lite 订阅';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.TRIAL) {
+      packageName = desc ?? '试用体验包';
+      isBasePackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.PACKAGE) {
+      packageName = desc ?? '加量包';
+      isExtraPackage = true;
+    } else if (productType === TRAE_PRODUCT_TYPE.CN_EXPRESS) {
+      packageName = desc ?? 'CN 专享速通包';
+      isExtraPackage = true;
+    }
+
+    const creditLimit =
+      pickFirstNumber(quota, ['credits_limit', 'credit_limit']) ??
+      pickFirstNumber(baseQuota, ['credits_limit', 'credit_limit']);
+    const creditUsed =
+      pickFirstNumber(usage, ['credits_amount', 'credit_amount', 'used_credits_amount']) ?? 0;
+
+    const fastLimit = pickFirstNumber(quota, ['premium_model_fast_request_limit']);
+    const fastUsed = pickFirstNumber(usage, ['premium_model_fast_amount']) ?? 0;
+
+    const basicLimit = getPackBasicQuota(pack);
+    const basicUsed = getPackBasicUsage(pack) ?? 0;
+
+    let total: number | null = null;
+    let used: number = 0;
+    let unit: 'credits' | 'fast_request' | 'usd' = 'credits';
+
+    if (creditLimit != null) {
+      total = creditLimit;
+      used = creditUsed;
+      unit = 'credits';
+    } else if (fastLimit != null) {
+      total = fastLimit;
+      used = fastUsed;
+      unit = 'fast_request';
+    } else if (basicLimit != null && basicLimit > 0) {
+      total = basicLimit;
+      used = basicUsed;
+      unit = 'usd';
+    } else {
+      continue;
+    }
+
+    const available = total === -1 ? -1 : Math.max(0, total - used);
+    const usedPercent = total > 0 ? Math.min(100, Math.max(0, Math.round((used / total) * 100))) : 0;
+    const remainPercent = total > 0 ? Math.min(100, Math.max(0, Math.round((available / total) * 100))) : null;
+
+    const resetAtSec = getPackResetAt(pack);
+    const timeMs = resetAtSec ? resetAtSec * 1000 : null;
+
+    resources.push({
+      packageCode: String(productType ?? 'pkg'),
+      packageName,
+      used,
+      total,
+      available,
+      usedPercent,
+      remainPercent,
+      expireAt: isBasePackage ? null : timeMs,
+      refreshAt: isBasePackage ? timeMs : null,
+      isBasePackage,
+      isExtraPackage,
+      unit,
+    });
+  }
+
+  return {
+    resources,
+    hasQuotaData: resources.length > 0,
+  };
+}
+
