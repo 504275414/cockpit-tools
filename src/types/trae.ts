@@ -1034,6 +1034,9 @@ export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuo
     } else if (productType === TRAE_PRODUCT_TYPE.CN_EXPRESS) {
       packageName = desc ?? 'CN 专享速通包';
       isExtraPackage = true;
+    } else {
+      packageName = desc ?? '活动赠送包';
+      isExtraPackage = true;
     }
 
     const creditLimit =
@@ -1096,4 +1099,131 @@ export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuo
     hasQuotaData: resources.length > 0,
   };
 }
+
+export type TraeQuotaCategory = 'base' | 'activity' | 'extra' | 'other';
+
+export interface TraeQuotaCategoryGroup {
+  key: TraeQuotaCategory;
+  label: string;
+  used: number;
+  total: number;
+  remain: number;
+  usedPercent: number;
+  remainPercent: number | null;
+  quotaClass: string;
+  items: TraeQuotaResource[];
+  visible: boolean;
+  unit?: 'credits' | 'fast_request' | 'usd';
+}
+
+export function getTraeQuotaCategoryGroups(
+  account: TraeAccount,
+  t: (key: string, defaultValue?: string) => string,
+): TraeQuotaCategoryGroup[] {
+  const model = getTraeOfficialQuotaModel(account);
+  if (!model.hasQuotaData || model.resources.length === 0) {
+    return [];
+  }
+
+  const baseItems: TraeQuotaResource[] = [];
+  const activityItems: TraeQuotaResource[] = [];
+
+  for (const resource of model.resources) {
+    if (resource.isBasePackage) {
+      baseItems.push(resource);
+    } else {
+      activityItems.push(resource);
+    }
+  }
+
+  const aggregate = (
+    items: TraeQuotaResource[],
+  ): Omit<TraeQuotaCategoryGroup, 'key' | 'label' | 'items' | 'visible'> => {
+    let hasInfinite = false;
+    let total = 0;
+    let used = 0;
+    let remain = 0;
+    let primaryUnit: 'credits' | 'fast_request' | 'usd' | undefined = undefined;
+
+    for (const item of items) {
+      if (!primaryUnit && item.unit) {
+        primaryUnit = item.unit;
+      }
+      if (item.total === -1) {
+        hasInfinite = true;
+      } else {
+        total += item.total;
+      }
+      used += item.used;
+      if (item.available !== -1) {
+        remain += item.available;
+      }
+    }
+
+    if (hasInfinite) {
+      total = -1;
+      remain = -1;
+    }
+
+    const usedPercent =
+      total > 0
+        ? Math.max(0, Math.min(100, Math.round((used / total) * 100)))
+        : 0;
+    const remainPercent =
+      total > 0
+        ? Math.max(0, Math.min(100, Math.round((remain / total) * 100)))
+        : hasInfinite
+          ? 100
+          : null;
+
+    const quotaClass =
+      remainPercent != null
+        ? remainPercent <= 10
+          ? 'critical'
+          : remainPercent <= 30
+            ? 'low'
+            : remainPercent <= 60
+              ? 'medium'
+              : 'high'
+        : 'high';
+
+    return {
+      total,
+      remain,
+      used,
+      usedPercent,
+      remainPercent,
+      quotaClass,
+      unit: primaryUnit,
+    };
+  };
+
+  const baseAgg = aggregate(baseItems);
+  const activityAgg = aggregate(activityItems);
+
+  const groups: TraeQuotaCategoryGroup[] = [];
+
+  if (baseItems.length > 0) {
+    groups.push({
+      key: 'base',
+      label: t('codebuddy.quotaCategory.base', '基础体验包'),
+      ...baseAgg,
+      items: baseItems,
+      visible: true,
+    });
+  }
+
+  if (activityItems.length > 0) {
+    groups.push({
+      key: 'activity',
+      label: t('codebuddy.quotaCategory.activity', '活动赠送包'),
+      ...activityAgg,
+      items: activityItems,
+      visible: true,
+    });
+  }
+
+  return groups;
+}
+
 

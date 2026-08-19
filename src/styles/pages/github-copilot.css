@@ -1373,7 +1373,8 @@
   width: 100%;
 }
 
-.trae-accounts-page .trae-official-quota-list.is-table {
+.trae-accounts-page .trae-official-quota-list.is-table,
+.trae-accounts-page .trae-quota-category-list.is-table {
   min-width: 260px;
   gap: 8px;
 }

@@ -43,6 +43,7 @@ import { TraeInstancesContent } from './TraeInstancesPage';
 import { useTraeAccountStore } from '../stores/useTraeAccountStore';
 import * as traeService from '../services/traeService';
 import type { TraePlatformId } from '../services/traeService';
+import { TraeQuotaCategoryList } from '../components/trae/TraeQuotaCategoryList';
 import type { TraeAccount } from '../types/trae';
 import {
   getTraeAccountDisplayEmail,
@@ -53,6 +54,7 @@ import {
   getTraePlanBadge,
   getTraePlanBadgeClass,
   getTraePlanDisplayName,
+  getTraeQuotaCategoryGroups,
   getTraeUsage,
   hasTraeQuotaData,
   isTraeCnAccountPlatform,
@@ -902,6 +904,21 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
 
   const renderQuotaSection = useCallback(
     (account: TraeAccount, variant: 'card' | 'table' = 'card') => {
+      const groups = getTraeQuotaCategoryGroups(account, (key, defaultValue) =>
+        t(key, defaultValue || key),
+      );
+
+      if (groups.length > 0) {
+        return (
+          <TraeQuotaCategoryList
+            groups={groups}
+            formatValue={formatQuotaValNum}
+            formatDateTime={formatQuotaDateTime}
+            variant={variant}
+          />
+        );
+      }
+
       const officialModel = getTraeOfficialQuotaModel(account);
       const hasOfficialResources = officialModel.hasQuotaData && officialModel.resources.length > 0;
 
@@ -964,7 +981,7 @@ export function TraeAccountsPage({ platformId = 'trae' }: TraeAccountsPageProps)
       const quota = resolveQuotaSummary(account);
       return renderCompactQuota(quota, variant);
     },
-    [formatQuotaDateTime, formatQuotaValNum, renderCompactQuota, resolveQuotaSummary, t],
+    [computeQuotaClass, formatQuotaDateTime, formatQuotaValNum, renderCompactQuota, resolveQuotaSummary, t],
   );
 
   const renderGridCards = useCallback(
