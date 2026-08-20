@@ -1010,24 +1010,36 @@ export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuo
     let isBasePackage = false;
     let isExtraPackage = false;
 
-    if (productType === TRAE_PRODUCT_TYPE.FREE) {
-      packageName = desc ?? '基础体验包';
+    const isMonthlyLoginGrant =
+      productType === TRAE_PRODUCT_TYPE.FREE ||
+      (desc != null &&
+        /(每月|登录|赠送|基础|free|login|monthly)/i.test(desc) &&
+        productType !== TRAE_PRODUCT_TYPE.PRO &&
+        productType !== TRAE_PRODUCT_TYPE.PRO_PLUS &&
+        productType !== TRAE_PRODUCT_TYPE.PRO_PLUS_PACK &&
+        productType !== TRAE_PRODUCT_TYPE.ULTRA &&
+        productType !== TRAE_PRODUCT_TYPE.PACKAGE &&
+        productType !== TRAE_PRODUCT_TYPE.CN_EXPRESS);
+
+    if (isMonthlyLoginGrant) {
+      packageName = desc ?? '每月登录赠送';
       isBasePackage = true;
+      isExtraPackage = false;
     } else if (productType === TRAE_PRODUCT_TYPE.PRO) {
       packageName = desc ?? '专业版订阅';
-      isBasePackage = true;
+      isExtraPackage = true;
     } else if (productType === TRAE_PRODUCT_TYPE.PRO_PLUS || productType === TRAE_PRODUCT_TYPE.PRO_PLUS_PACK) {
       packageName = desc ?? 'Pro+ 订阅';
-      isBasePackage = true;
+      isExtraPackage = true;
     } else if (productType === TRAE_PRODUCT_TYPE.ULTRA) {
       packageName = desc ?? 'Ultra 订阅';
-      isBasePackage = true;
+      isExtraPackage = true;
     } else if (productType === TRAE_PRODUCT_TYPE.LITE) {
       packageName = desc ?? 'Lite 订阅';
-      isBasePackage = true;
+      isExtraPackage = true;
     } else if (productType === TRAE_PRODUCT_TYPE.TRIAL) {
       packageName = desc ?? '试用体验包';
-      isBasePackage = true;
+      isExtraPackage = true;
     } else if (productType === TRAE_PRODUCT_TYPE.PACKAGE) {
       packageName = desc ?? '加量包';
       isExtraPackage = true;
