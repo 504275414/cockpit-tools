@@ -1010,6 +1010,8 @@ export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuo
     let isBasePackage = false;
     let isExtraPackage = false;
 
+    // CN 侧「每月登录赠送」等免费权益的 product_type 也是 PACKAGE(2)，
+    // 不能仅凭类型排除；按 display_desc 关键词判定 base（基础体验包）归属。
     const isMonthlyLoginGrant =
       productType === TRAE_PRODUCT_TYPE.FREE ||
       (desc != null &&
@@ -1018,7 +1020,6 @@ export function getTraeOfficialQuotaModel(account: TraeAccount): TraeOfficialQuo
         productType !== TRAE_PRODUCT_TYPE.PRO_PLUS &&
         productType !== TRAE_PRODUCT_TYPE.PRO_PLUS_PACK &&
         productType !== TRAE_PRODUCT_TYPE.ULTRA &&
-        productType !== TRAE_PRODUCT_TYPE.PACKAGE &&
         productType !== TRAE_PRODUCT_TYPE.CN_EXPRESS);
 
     if (isMonthlyLoginGrant) {
