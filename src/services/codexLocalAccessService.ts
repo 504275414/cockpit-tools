@@ -8,6 +8,8 @@ import type {
   CodexLocalAccessClientBaseUrlHost,
   CodexLocalAccessGatewayMode,
   CodexLocalAccessModelAlias,
+  CodexLocalAccessAccountWindowQuery,
+  CodexLocalAccessAccountWindowStats,
   CodexLocalAccessModelPricing,
   CodexLocalAccessOAuthQuotaReserve,
   CodexLocalAccessPortCleanupResult,
@@ -20,6 +22,7 @@ import type {
   CodexLocalAccessTimeoutPreset,
   CodexLocalAccessTimeouts,
   CodexLocalAccessUsageEventPage,
+  CodexLocalAccessImageGenerationPolicy,
 } from "../types/codexLocalAccess";
 
 export async function getCodexLocalAccessState(): Promise<CodexLocalAccessState> {
@@ -33,6 +36,7 @@ export async function saveCodexLocalAccessAccounts(
   preferredAccountIds?: string[],
   sessionAffinity?: boolean,
   sessionAffinityTtlMs?: number,
+  imageGenerationAccountPolicies?: Record<string, CodexLocalAccessImageGenerationPolicy>,
 ): Promise<CodexLocalAccessState> {
   return await invoke("codex_local_access_save_accounts", {
     accountIds,
@@ -41,6 +45,7 @@ export async function saveCodexLocalAccessAccounts(
     preferredAccountIds: preferredAccountIds ?? null,
     sessionAffinity: sessionAffinity ?? null,
     sessionAffinityTtlMs: sessionAffinityTtlMs ?? null,
+    imageGenerationAccountPolicies: imageGenerationAccountPolicies ?? null,
   });
 }
 
@@ -107,8 +112,20 @@ export async function queryCodexLocalAccessStats(
   return await invoke("codex_local_access_query_stats", { startAt, endAt });
 }
 
+export async function queryCodexLocalAccessAccountWindowStats(
+  queries: CodexLocalAccessAccountWindowQuery[],
+): Promise<CodexLocalAccessAccountWindowStats[]> {
+  return await invoke("codex_local_access_query_account_window_stats", {
+    queries,
+  });
+}
+
 export async function prepareCodexLocalAccessForRestart(): Promise<CodexLocalAccessState> {
   return await invoke("codex_local_access_prepare_restart");
+}
+
+export async function restartCodexLocalAccessSidecar(): Promise<CodexLocalAccessState> {
+  return await invoke("codex_local_access_restart_sidecar");
 }
 
 export async function killCodexLocalAccessPort(): Promise<CodexLocalAccessPortCleanupResult> {
@@ -254,6 +271,7 @@ export async function updateCodexLocalAccessApiKey(
     modelPrefix?: string | null;
     allowedModels?: string[] | null;
     excludedModels?: string[] | null;
+    tokenLimit?: number | null;
     accountIds?: string[] | null;
     inheritAccountPool?: boolean | null;
   },
@@ -265,6 +283,7 @@ export async function updateCodexLocalAccessApiKey(
     modelPrefix: payload.modelPrefix ?? null,
     allowedModels: payload.allowedModels ?? null,
     excludedModels: payload.excludedModels ?? null,
+    tokenLimit: payload.tokenLimit ?? null,
     accountIds: payload.accountIds ?? null,
     inheritAccountPool: payload.inheritAccountPool ?? null,
   });

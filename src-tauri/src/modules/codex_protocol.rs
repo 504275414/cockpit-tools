@@ -7,7 +7,7 @@ const CODEX_AUTO_REVIEW_MODEL_ID: &str = "codex-auto-review";
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 const CODEX_CLIENT_MODEL_TEMPLATES_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../sidecars/cockpit-cliproxy/cdk/CLIProxyAPI/internal/registry/models/codex_client_models.json"
+    "/../sidecars/cockpit-cliproxy/third_party/CLIProxyAPI/internal/registry/models/codex_client_models.json"
 ));
 const DEFAULT_CONTEXT_WINDOW: i64 = 272_000;
 const DEFAULT_MAX_CONTEXT_WINDOW: i64 = 1_000_000;
@@ -60,20 +60,147 @@ pub fn build_codex_client_models_response(model_ids: &[String]) -> Value {
     json!({ "models": models })
 }
 
-pub(crate) fn managed_codex_model_ids() -> Vec<String> {
-    codex_client_model_catalog()
-        .get("model_overrides")
-        .and_then(Value::as_array)
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(|model| model.get("slug").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .map(str::to_string)
-                .collect()
+pub fn build_codex_client_models_response_with_model_definitions(
+    definitions: &[(String, String)],
+) -> Value {
+    let definitions = definitions
+        .iter()
+        .map(|(model_id, display_name)| (model_id.clone(), display_name.clone(), None))
+        .collect::<Vec<_>>();
+    build_codex_client_models_response_with_model_definitions_and_reasoning(&definitions)
+}
+
+pub fn build_codex_client_models_response_with_model_definitions_and_reasoning(
+    definitions: &[(String, String, Option<Vec<String>>)],
+) -> Value {
+    let models = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, (model_id, display_name, reasoning_efforts))| {
+            let mut model = build_codex_client_model(model_id, index);
+            if let Some(object) = model.as_object_mut() {
+                object.insert(
+                    "display_name".to_string(),
+                    Value::String(display_name.clone()),
+                );
+                object.insert(
+                    "description".to_string(),
+                    Value::String(display_name.clone()),
+                );
+                if let Some(reasoning_efforts) = reasoning_efforts {
+                    apply_reasoning_effort_override(object, reasoning_efforts);
+                }
+            }
+            model
         })
-        .unwrap_or_default()
+        .collect::<Vec<_>>();
+    json!({ "models": models })
+}
+
+pub fn apply_model_context_overrides(
+    catalog: &mut Value,
+    definitions: &[(String, Option<i64>, Option<i64>)],
+) {
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for model in models {
+        let Some(slug) = model
+            .get("slug")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some((_, context_window, auto_compact_token_limit)) = definitions
+            .iter()
+            .find(|(model_id, _, _)| model_id.trim().eq_ignore_ascii_case(slug))
+        else {
+            continue;
+        };
+        let Some(object) = model.as_object_mut() else {
+            continue;
+        };
+        if let Some(context_window) = context_window.filter(|value| *value > 0) {
+            object.insert("context_window".to_string(), json!(context_window));
+            object.insert("max_context_window".to_string(), json!(context_window));
+        }
+        if let Some(auto_compact_token_limit) = auto_compact_token_limit.filter(|value| *value > 0)
+        {
+            object.insert(
+                "auto_compact_token_limit".to_string(),
+                json!(auto_compact_token_limit),
+            );
+        }
+    }
+}
+
+fn apply_reasoning_effort_override(object: &mut Map<String, Value>, efforts: &[String]) {
+    let canonical_model = codex_client_model_template("gpt-5.6-sol").0;
+    let Some(levels) = canonical_model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let selected = efforts
+        .iter()
+        .filter_map(|effort| {
+            levels
+                .iter()
+                .find(|level| level.get("effort").and_then(Value::as_str) == Some(effort))
+                .cloned()
+                .or_else(|| Some(json!({"effort": effort})))
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return;
+    }
+    object.insert(
+        "supported_reasoning_levels".to_string(),
+        Value::Array(selected.clone()),
+    );
+    let current_default = object
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !efforts.iter().any(|effort| effort == current_default) {
+        if let Some(first) = efforts.first() {
+            object.insert(
+                "default_reasoning_level".to_string(),
+                Value::String(first.clone()),
+            );
+        }
+    }
+}
+
+pub(crate) fn managed_codex_model_ids() -> Vec<String> {
+    let catalog = codex_client_model_catalog();
+    let overrides = catalog.get("model_overrides").and_then(Value::as_array);
+    let models = overrides
+        .filter(|models| !models.is_empty())
+        .or_else(|| catalog.get("models").and_then(Value::as_array));
+
+    models
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            overrides.is_some_and(|overrides| !overrides.is_empty())
+                || (model
+                    .get("use_responses_lite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && !model
+                        .get("visibility")
+                        .and_then(Value::as_str)
+                        .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide")))
+        })
+        .filter_map(|model| model.get("slug").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn normalize_responses_body_for_codex(body: &mut Value) -> bool {
@@ -110,10 +237,11 @@ pub fn normalize_responses_body_for_codex_with_lite(
 }
 
 pub(crate) fn codex_model_uses_responses_lite(model_id: &str) -> bool {
-    codex_client_model_catalog()
-        .get("model_overrides")
-        .and_then(Value::as_array)
-        .is_some_and(|models| {
+    let catalog = codex_client_model_catalog();
+    ["model_overrides", "models"]
+        .into_iter()
+        .filter_map(|key| catalog.get(key).and_then(Value::as_array))
+        .any(|models| {
             models.iter().any(|model| {
                 model
                     .get("slug")
@@ -456,9 +584,17 @@ fn normalize_responses_input_item(item: &mut Value) -> bool {
         return false;
     };
 
-    // Provider adapters use this extension to reconstruct namespaced tool calls,
-    // but the official Codex Responses endpoint rejects it on replayed input items.
-    let mut changed = obj.remove("namespace").is_some();
+    // Keep call namespaces for the sidecar's provider-specific compatibility
+    // handling, while dropping unsupported namespaces from other replayed items.
+    let preserves_namespace = matches!(
+        obj.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call" | "tool_call" | "mcp_tool_call")
+    );
+    let mut changed = if preserves_namespace {
+        false
+    } else {
+        obj.remove("namespace").is_some()
+    };
     let role = obj
         .get("role")
         .and_then(Value::as_str)
@@ -845,16 +981,29 @@ mod tests {
     }
 
     #[test]
-    fn removes_provider_namespace_from_replayed_input_items() {
+    fn preserves_namespace_on_replayed_function_calls() {
         let mut body = json!({
             "model": "gpt-5.4",
-            "input": [{
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": "lookup",
-                "namespace": "mcp__example",
-                "arguments": "{}"
-            }],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "namespace": "mcp__example",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "result"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_2",
+                    "name": "plain_lookup",
+                    "arguments": "{}"
+                }
+            ],
             "tools": [{
                 "type": "namespace",
                 "name": "mcp__example"
@@ -862,7 +1011,10 @@ mod tests {
         });
 
         assert!(normalize_responses_body_for_codex(&mut body));
-        assert!(body.pointer("/input/0/namespace").is_none());
+        assert_eq!(
+            body.pointer("/input/0/namespace").and_then(Value::as_str),
+            Some("mcp__example")
+        );
         assert_eq!(
             body.pointer("/input/0/name").and_then(Value::as_str),
             Some("lookup")
@@ -872,9 +1024,66 @@ mod tests {
             Some("call_1")
         );
         assert_eq!(
+            body.pointer("/input/1/call_id").and_then(Value::as_str),
+            Some("call_1")
+        );
+        assert_eq!(
+            body.pointer("/input/1/output").and_then(Value::as_str),
+            Some("result")
+        );
+        assert!(body.pointer("/input/2/namespace").is_none());
+        assert_eq!(
+            body.pointer("/input/2/name").and_then(Value::as_str),
+            Some("plain_lookup")
+        );
+        assert_eq!(
+            body.pointer("/input/2/call_id").and_then(Value::as_str),
+            Some("call_2")
+        );
+        assert_eq!(
             body.pointer("/tools/0/type").and_then(Value::as_str),
             Some("namespace")
         );
+    }
+
+    #[test]
+    fn preserving_supported_call_namespaces_does_not_report_change() {
+        for item_type in [
+            "function_call",
+            "custom_tool_call",
+            "tool_call",
+            "mcp_tool_call",
+        ] {
+            let mut item = json!({
+                "type": item_type,
+                "namespace": "mcp__example"
+            });
+            let expected = item.clone();
+
+            assert!(
+                !normalize_responses_input_item(&mut item),
+                "{item_type} should not report a change"
+            );
+            assert_eq!(item, expected);
+        }
+    }
+
+    #[test]
+    fn removes_namespace_from_non_call_replayed_input_items() {
+        let mut body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "namespace": "mcp__example",
+                    "content": "hello"
+                }
+            ]
+        });
+
+        assert!(normalize_responses_body_for_codex(&mut body));
+        assert!(body.pointer("/input/0/namespace").is_none());
     }
 
     #[test]
@@ -986,9 +1195,71 @@ mod tests {
             );
             assert_eq!(
                 model.get("context_window").and_then(Value::as_i64),
-                Some(372_000)
+                Some(272_000)
+            );
+            assert_eq!(
+                model.get("max_context_window").and_then(Value::as_i64),
+                Some(921_000)
+            );
+            assert_eq!(
+                model.get("tool_mode").and_then(Value::as_str),
+                Some("code_mode_only")
+            );
+            assert_eq!(
+                model.get("use_responses_lite").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                model.get("shell_type").and_then(Value::as_str),
+                Some("shell_command")
+            );
+            assert_eq!(
+                model.get("apply_patch_tool_type").and_then(Value::as_str),
+                Some("freeform")
             );
         }
+    }
+
+    #[test]
+    fn model_catalog_uses_configured_display_names() {
+        let response = build_codex_client_models_response_with_model_definitions(&[
+            ("gpt-5.6-sol".to_string(), "Sol Display".to_string()),
+            ("custom-model".to_string(), "Custom Display".to_string()),
+        ]);
+        assert_eq!(
+            response
+                .pointer("/models/0/display_name")
+                .and_then(Value::as_str),
+            Some("Sol Display")
+        );
+        assert_eq!(
+            response
+                .pointer("/models/1/display_name")
+                .and_then(Value::as_str),
+            Some("Custom Display")
+        );
+    }
+
+    #[test]
+    fn custom_model_uses_general_capabilities_and_overrides_identity() {
+        let response = build_codex_client_models_response_with_model_definitions(&[
+            ("gpt-5.5".to_string(), "GPT-5.5".to_string()),
+            ("custom-model".to_string(), "Custom Model".to_string()),
+        ]);
+        let models = response["models"].as_array().expect("models array");
+        let base = &models[0];
+        let custom = &models[1];
+        assert_eq!(custom["slug"], "custom-model");
+        assert_eq!(custom["display_name"], "Custom Model");
+        assert_eq!(custom["description"], "Custom Model");
+        assert_eq!(custom["context_window"], DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(custom["max_context_window"], DEFAULT_MAX_CONTEXT_WINDOW);
+        assert_eq!(
+            custom["supported_reasoning_levels"],
+            base["supported_reasoning_levels"]
+        );
+        assert_eq!(custom["input_modalities"], base["input_modalities"]);
+        assert_eq!(custom["visibility"], "list");
     }
 
     #[test]

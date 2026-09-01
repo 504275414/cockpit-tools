@@ -1,14 +1,39 @@
 export type CodexApiProviderMode = "openai_builtin" | "custom";
 export type CodexProviderWireApi = "responses" | "chat_completions";
 
+export interface CodexApiModelMapping {
+  client_model: string;
+  upstream_model: string;
+}
+
+export interface CodexExperimentalModelDefinition {
+  model_id: string;
+  display_name: string;
+  /** undefined follows the official model reasoning levels; otherwise custom multi-select. */
+  reasoning_efforts?: CodexReasoningEffort[];
+  /** undefined follows the model catalog metadata. */
+  context_window?: number;
+  /** undefined follows the model catalog metadata. */
+  auto_compact_token_limit?: number;
+}
+
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
 export interface CodexQuickConfig {
   context_window_1m: boolean;
   auto_compact_token_limit: number;
   detected_model_context_window?: number;
   detected_auto_compact_token_limit?: number;
+  experimental_model_catalog_enabled: boolean;
+  experimental_model_catalog_available: boolean;
+  experimental_model_catalog_unavailable_reason?: "catalog_conflict";
+  experimental_model_catalog_conflict?: string;
+  experimental_model_catalog_models: CodexExperimentalModelDefinition[];
+  experimental_model_catalog_default_model_id?: string | null;
 }
 
 export type CodexAppSpeed = "standard" | "fast";
+export type CodexFingerprintMode = "off" | "device" | "session" | "full";
 
 export interface CodexAppSpeedConfig {
   speed: CodexAppSpeed;
@@ -26,12 +51,16 @@ export interface CodexAccount {
   api_provider_id?: string;
   api_provider_name?: string;
   api_model_catalog?: string[];
+  api_model_context_windows?: Record<string, number>;
+  api_model_mappings?: CodexApiModelMapping[];
   api_sync_model_catalog_to_codex?: boolean;
   api_wire_api?: CodexProviderWireApi | null;
   api_supports_websockets?: boolean;
   api_supports_vision?: boolean;
   api_model_vision_support?: Record<string, boolean>;
   api_vision_routing_model?: string | null;
+  api_instance_access_mode?: "gateway" | "direct" | "cdp" | string | null;
+  api_startup_model?: string | null;
   bound_oauth_account_id?: string | null;
   user_id?: string;
   plan_type?: string;
@@ -47,6 +76,9 @@ export interface CodexAccount {
   account_name?: string;
   account_structure?: string;
   account_note?: string;
+  codex_fingerprint_mode?: CodexFingerprintMode;
+  codex_cli_only?: boolean;
+  codex_cli_only_allow_app_server?: boolean;
   two_factor_secret?: string;
   account_password?: string;
   phone_number?: string;
@@ -59,6 +91,11 @@ export interface CodexAccount {
   authorization_status?: string | null;
   requires_reauth?: boolean;
   reauth_reason?: string;
+  client_auth_status?: "available" | "login_required" | "unknown" | string | null;
+  last_client_auth_observed_at?: number | null;
+  last_client_login_redirect_at?: number | null;
+  last_client_launch_at?: number | null;
+  last_client_auth_instance_id?: string | null;
   quota?: CodexQuota;
   quota_error?: CodexQuotaErrorInfo;
   tags?: string[];
@@ -73,6 +110,16 @@ export interface CodexAccountNoteUpdate {
   phoneNumber?: string;
   mailUrl?: string;
   chatgptAccountId?: string;
+}
+
+export function isStandardCodexOAuthAccount(account?: CodexAccount | null): boolean {
+  if (!account || isCodexApiKeyAccount(account)) return false;
+  if (isCodexAgentIdentityAccount(account) || isCodexWebSessionAccount(account)) return false;
+  if (isCodexPendingOAuthAccount(account)) return false;
+  const accessToken = account.tokens?.access_token?.trim() || "";
+  const hasRefreshToken = Boolean(account.tokens?.refresh_token?.trim());
+  const hasIdToken = Boolean(account.tokens?.id_token?.trim());
+  return Boolean(accessToken) && !accessToken.startsWith("at-") && (hasRefreshToken || hasIdToken);
 }
 
 export interface CodexBatchDeleteError {
@@ -154,6 +201,16 @@ export interface CodexQuota {
   reset_credits_next_expires_at?: number;
   /** 原始响应数据 */
   raw_data?: unknown;
+}
+
+export interface CodexMonthlyCreditUsage {
+  used?: number;
+  total?: number;
+  remaining?: number;
+  remainingPercent?: number;
+  balance?: string;
+  unlimited?: boolean;
+  resetTime?: number;
 }
 
 export interface CodexResetCredit {
@@ -261,6 +318,10 @@ export interface CodexSessionVisibilityRepairItem {
   updatedSqliteTimestampRowCount: number;
   addedSessionIndexEntryCount: number;
   updatedSessionIndexEntryCount: number;
+  insertedCatalogRowCount: number;
+  removedCatalogRowCount: number;
+  updatedGlobalStateEntryCount: number;
+  skippedRolloutFileCount: number;
   skippedSqliteFile: boolean;
   metadataRebuildFailed: boolean;
   backupDir?: string | null;
@@ -328,6 +389,11 @@ export interface CodexSessionVisibilityRepairSummary {
   updatedSqliteTimestampRowCount: number;
   addedSessionIndexEntryCount: number;
   updatedSessionIndexEntryCount: number;
+  insertedCatalogRowCount: number;
+  removedCatalogRowCount: number;
+  updatedGlobalStateEntryCount: number;
+  skippedRolloutFileCount: number;
+  encryptedContentWarning?: string | null;
   skippedSqliteFileCount: number;
   metadataRebuildFailedCount: number;
   items: CodexSessionVisibilityRepairItem[];
@@ -362,6 +428,62 @@ export interface CodexSessionTokenStats {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+}
+
+export interface CodexSessionUsageTotals {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requestCount: number;
+  estimatedCostUsd?: number;
+}
+
+export interface CodexSessionUsageBreakdownRow {
+  key: string;
+  label: string;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  requestCount: number;
+}
+
+export interface CodexSessionUsageInstanceOption {
+  id: string;
+  name: string;
+}
+
+export interface CodexSessionUsageQuery {
+  fromTimestamp?: number | null;
+  toTimestamp?: number | null;
+  instanceId?: string | null;
+}
+
+export interface CodexSessionUsageReport {
+  totals: CodexSessionUsageTotals;
+  byModel: CodexSessionUsageBreakdownRow[];
+  byInstance: CodexSessionUsageBreakdownRow[];
+  byDay: CodexSessionUsageBreakdownRow[];
+  instances: CodexSessionUsageInstanceOption[];
+  fromTimestamp?: number | null;
+  toTimestamp?: number | null;
+  lastSyncedAt?: number | null;
+  filesTracked: number;
+  eventCount: number;
+  deferredFiles: number;
+  lastErrorCount: number;
+}
+
+export interface CodexSessionUsageSyncResult {
+  imported: number;
+  skipped: number;
+  filesScanned: number;
+  filesChanged: number;
+  deferredFiles: number;
+  errors: string[];
+  rebuilt: boolean;
+  report?: CodexSessionUsageReport | null;
 }
 
 export interface CodexInstanceTargetThreadSyncSummary {
@@ -524,9 +646,14 @@ function toBoolValue(value: unknown): boolean | undefined {
 }
 
 function toFiniteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value
-    : undefined;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 function decodeJwtPayload(token: string | undefined): JsonRecord | null {
@@ -673,6 +800,63 @@ export function getCodexCodeReviewQuotaMetric(
       ? normalizeCodeReviewWindow(secondaryWindow, "weekly")
       : null)
   );
+}
+
+export function getCodexMonthlyCreditUsage(
+  quota: CodexQuota | undefined,
+): CodexMonthlyCreditUsage | null {
+  const raw = toJsonRecord(quota?.raw_data);
+  if (!raw) return null;
+
+  const spendControl = toJsonRecord(raw.spend_control);
+  const individualLimit = toJsonRecord(spendControl?.individual_limit);
+  if (individualLimit) {
+    const total = toFiniteNumber(individualLimit.limit);
+    const used = toFiniteNumber(individualLimit.used);
+    const remaining =
+      toFiniteNumber(individualLimit.remaining) ??
+      (total != null && used != null ? Math.max(0, total - used) : undefined);
+    const remainingPercent =
+      toFiniteNumber(individualLimit.remaining_percent) ??
+      (total != null && total > 0 && remaining != null
+        ? Math.round((remaining / total) * 100)
+        : undefined);
+
+    if (
+      total != null ||
+      used != null ||
+      remaining != null ||
+      remainingPercent != null
+    ) {
+      const resetAfterSeconds = toFiniteNumber(
+        individualLimit.reset_after_seconds,
+      );
+      return {
+        used,
+        total,
+        remaining,
+        remainingPercent:
+          remainingPercent == null
+            ? undefined
+            : Math.max(0, Math.min(100, Math.round(remainingPercent))),
+        resetTime:
+          normalizeCodexUnixSeconds(individualLimit.reset_at) ??
+          (resetAfterSeconds != null && resetAfterSeconds >= 0
+            ? Math.floor(Date.now() / 1000) + resetAfterSeconds
+            : undefined),
+      };
+    }
+  }
+
+  // Older responses may expose only a credits balance without the effective limit.
+  const credits = toJsonRecord(raw.credits);
+  if (!credits) return null;
+  const unlimited = toBoolValue(credits.unlimited) ?? false;
+  const balance = toStringValue(credits.balance);
+  const remaining =
+    toFiniteNumber(credits.remaining) ?? toFiniteNumber(credits.balance);
+  if (!unlimited && balance == null && remaining == null) return null;
+  return { balance, remaining, unlimited };
 }
 
 function normalizeCodexAdditionalLimitLabel(
@@ -839,10 +1023,35 @@ function normalizeCodexPlanKey(planType?: string): string {
   return normalized;
 }
 
+function getCodexEffectivePlanKey(account: CodexAccount): string {
+  const planKey = normalizeCodexPlanKey(account.plan_type);
+  if (
+    planKey === "free" ||
+    isCodexApiKeyAccount(account) ||
+    isCodexPendingOAuthAccount(account) ||
+    isCodexAgentIdentityAccount(account) ||
+    isCodexWebSessionAccount(account)
+  ) {
+    return planKey;
+  }
+
+  const subscriptionExpiry = parseCodexSubscriptionDate(
+    account.subscription_active_until,
+  );
+  if (subscriptionExpiry && subscriptionExpiry.getTime() <= Date.now()) {
+    return "free";
+  }
+  return planKey;
+}
+
 export function isCodexExplicitFreePlanType(planType?: string): boolean {
   const normalized = (planType || "").trim();
   if (!normalized) return false;
   return normalizeCodexPlanKey(planType) === "free";
+}
+
+export function isCodexEffectiveFreePlan(account: CodexAccount): boolean {
+  return getCodexEffectivePlanKey(account) === "free";
 }
 
 function normalizeCodexAuthFilePlanType(
@@ -878,8 +1087,9 @@ function getCodexPlanBadgeLabel(account: CodexAccount): string {
   if (isCodexApiKeyAccount(account)) {
     return "API";
   }
-  const baseLabel = getCodexPlanDisplayName(account.plan_type);
-  if (normalizeCodexPlanKey(account.plan_type) !== "pro") {
+  const effectivePlanKey = getCodexEffectivePlanKey(account);
+  const baseLabel = getCodexPlanDisplayName(effectivePlanKey);
+  if (effectivePlanKey !== "pro") {
     return baseLabel;
   }
 
@@ -898,7 +1108,7 @@ function getCodexPlanBadgeClass(account: CodexAccount): string {
   if (isCodexNewApiAccount(account)) {
     return "api-key new-api-exclusive";
   }
-  const baseClass = normalizeCodexPlanKey(account.plan_type);
+  const baseClass = getCodexEffectivePlanKey(account);
   if (baseClass === "plus") {
     return "plus codex-plus";
   }
@@ -947,7 +1157,7 @@ export function getCodexPlanBadgePresentationWithStyle(
 
 export function getCodexPlanFilterKey(account: CodexAccount): string {
   if (isCodexPendingOAuthAccount(account)) return "PENDING";
-  return normalizeCodexPlanKey(account.plan_type).toUpperCase();
+  return getCodexEffectivePlanKey(account).toUpperCase();
 }
 
 export function isCodexTeamLikePlan(planType?: string): boolean {

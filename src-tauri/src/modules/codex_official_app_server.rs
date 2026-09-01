@@ -263,6 +263,11 @@ fn app_server_executable_from_codex_launch_path(path: &Path) -> Option<PathBuf> 
         return Some(contents_dir.join("Resources").join("codex"));
     }
 
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if path_file_name_eq(&resolved, "chatgpt") && parent_file_name_eq(&resolved, "chatgpt") {
+        return Some(resolved.parent()?.join("resources").join("codex"));
+    }
+
     if path_file_name_eq(path, "codex.exe") {
         return Some(path.parent()?.join("resources").join("codex.exe"));
     }
@@ -326,6 +331,13 @@ fn send_request(stdin: &mut impl Write, request: JsonValue) -> Result<(), String
 }
 
 fn wait_for_response(receiver: &mpsc::Receiver<String>, request_id: i64) -> Result<(), String> {
+    wait_for_response_value(receiver, request_id).map(|_| ())
+}
+
+fn wait_for_response_value(
+    receiver: &mpsc::Receiver<String>,
+    request_id: i64,
+) -> Result<JsonValue, String> {
     loop {
         let line = receiver
             .recv_timeout(APP_SERVER_RESPONSE_TIMEOUT)
@@ -347,7 +359,7 @@ fn wait_for_response(receiver: &mpsc::Receiver<String>, request_id: i64) -> Resu
             ));
         }
         if value.get("result").is_some() {
-            return Ok(());
+            return Ok(value);
         }
         return Err(format!(
             "官方 app-server 响应缺少 result (id={}): {}",
@@ -455,6 +467,15 @@ mod tests {
         assert_eq!(
             app_server_executable_from_codex_launch_path(&app_server_path),
             Some(app_server_path)
+        );
+    }
+
+    #[test]
+    fn maps_linux_chatgpt_binary_to_resources_app_server() {
+        let launch_path = PathBuf::from("/usr/lib/chatgpt/ChatGPT");
+        assert_eq!(
+            app_server_executable_from_codex_launch_path(&launch_path),
+            Some(PathBuf::from("/usr/lib/chatgpt/resources/codex"))
         );
     }
 }

@@ -107,6 +107,9 @@ pub struct UserConfig {
     /// 是否启用 Codex 客户端中的 API 服务额度显示注入
     #[serde(default = "default_codex_app_ui_injection_enabled")]
     pub codex_app_ui_injection_enabled: bool,
+    /// 是否全局允许 Codex app-server 第三方客户端（账户级开关仍可单独放行）
+    #[serde(default = "default_codex_cli_only_allow_app_server_clients")]
+    pub codex_cli_only_allow_app_server_clients: bool,
     /// Codex WSL 配置目录 (Windows Only)
     #[serde(default = "default_codex_wsl_config_dir")]
     pub codex_wsl_config_dir: String,
@@ -131,6 +134,12 @@ pub struct UserConfig {
     /// 默认实例切号时是否同步写入官方 ~/.grok/auth.json
     #[serde(default)]
     pub grok_sync_official_auth_on_switch: bool,
+    /// 切换 Grok 时是否自动重启 OpenCode
+    #[serde(default = "default_grok_opencode_sync_on_switch")]
+    pub grok_opencode_sync_on_switch: bool,
+    /// 切换 Grok 时是否覆盖 OpenCode 登录信息
+    #[serde(default = "default_grok_opencode_auth_overwrite_on_switch")]
+    pub grok_opencode_auth_overwrite_on_switch: bool,
     /// Claude 自动刷新间隔（分钟），-1 表示禁用
     #[serde(default = "default_claude_auto_refresh")]
     pub claude_auto_refresh_minutes: i32,
@@ -236,6 +245,9 @@ pub struct UserConfig {
     /// 最近一次自动备份时间（ISO 8601）
     #[serde(default)]
     pub auto_backup_last_backup_at: Option<String>,
+    /// Cockpit 生成的本地备份根目录；为空时使用数据目录下的 backups
+    #[serde(default)]
+    pub backup_directory: String,
     /// WebDAV 备份同步是否启用
     #[serde(default = "default_webdav_sync_enabled")]
     pub webdav_sync_enabled: bool,
@@ -281,6 +293,9 @@ pub struct UserConfig {
     /// Codex 启动路径（为空则使用默认路径）
     #[serde(default = "default_codex_app_path")]
     pub codex_app_path: String,
+    /// OAuth hosted login 使用的官方桌面版本（为空则跟随远端默认值）
+    #[serde(default)]
+    pub codex_oauth_app_version: String,
     /// Grok CLI 路径（为空则自动检测）
     #[serde(default)]
     pub grok_cli_path: Option<String>,
@@ -701,6 +716,10 @@ fn default_codex_sync_wsl() -> bool {
 fn default_codex_app_ui_injection_enabled() -> bool {
     true
 }
+
+fn default_codex_cli_only_allow_app_server_clients() -> bool {
+    false
+}
 fn default_codex_wsl_config_dir() -> String {
     String::new()
 }
@@ -959,7 +978,7 @@ fn default_workbuddy_app_path() -> String {
     String::new()
 }
 fn default_workbuddy_share_sessions_on_switch() -> bool {
-    false
+    true
 }
 fn default_opencode_sync_on_switch() -> bool {
     false
@@ -971,6 +990,12 @@ fn default_ghcp_opencode_sync_on_switch() -> bool {
     false
 }
 fn default_ghcp_opencode_auth_overwrite_on_switch() -> bool {
+    false
+}
+fn default_grok_opencode_sync_on_switch() -> bool {
+    false
+}
+fn default_grok_opencode_auth_overwrite_on_switch() -> bool {
     false
 }
 fn default_ghcp_launch_on_switch() -> bool {
@@ -1161,6 +1186,8 @@ impl Default for UserConfig {
             codex_auto_refresh_minutes: default_codex_auto_refresh(),
             codex_sync_wsl: default_codex_sync_wsl(),
             codex_app_ui_injection_enabled: default_codex_app_ui_injection_enabled(),
+            codex_cli_only_allow_app_server_clients:
+                default_codex_cli_only_allow_app_server_clients(),
             codex_wsl_config_dir: default_codex_wsl_config_dir(),
             zed_auto_refresh_minutes: default_zed_auto_refresh(),
             ghcp_auto_refresh_minutes: default_ghcp_auto_refresh(),
@@ -1169,6 +1196,9 @@ impl Default for UserConfig {
             cursor_auto_refresh_minutes: default_cursor_auto_refresh(),
             grok_auto_refresh_minutes: default_grok_auto_refresh(),
             grok_sync_official_auth_on_switch: false,
+            grok_opencode_sync_on_switch: default_grok_opencode_sync_on_switch(),
+            grok_opencode_auth_overwrite_on_switch: default_grok_opencode_auth_overwrite_on_switch(
+            ),
             claude_auto_refresh_minutes: default_claude_auto_refresh(),
             codebuddy_auto_refresh_minutes: default_codebuddy_auto_refresh(),
             codebuddy_cn_auto_refresh_minutes: default_codebuddy_cn_auto_refresh(),
@@ -1206,6 +1236,7 @@ impl Default for UserConfig {
             auto_backup_retention_days: default_auto_backup_retention_days(),
             auto_backup_retention_days_migrated: default_auto_backup_retention_days_migrated(),
             auto_backup_last_backup_at: None,
+            backup_directory: String::new(),
             webdav_sync_enabled: default_webdav_sync_enabled(),
             webdav_sync_url: default_webdav_sync_url(),
             webdav_sync_username: default_webdav_sync_username(),
@@ -1221,6 +1252,7 @@ impl Default for UserConfig {
             opencode_app_path: default_opencode_app_path(),
             antigravity_app_path: default_antigravity_app_path(),
             codex_app_path: default_codex_app_path(),
+            codex_oauth_app_version: String::new(),
             grok_cli_path: None,
             claude_app_path: default_claude_app_path(),
             claude_app_scan_roots: default_claude_app_scan_roots(),
@@ -2546,6 +2578,18 @@ mod tests {
         let migrated_cfg: UserConfig =
             serde_json::from_value(serde_json::json!({})).expect("旧配置反序列化应成功");
         assert!(!migrated_cfg.grok_sync_official_auth_on_switch);
+    }
+
+    #[test]
+    fn grok_opencode_sync_defaults_to_disabled() {
+        let default_cfg = UserConfig::default();
+        assert!(!default_cfg.grok_opencode_sync_on_switch);
+        assert!(!default_cfg.grok_opencode_auth_overwrite_on_switch);
+
+        let migrated_cfg: UserConfig =
+            serde_json::from_value(serde_json::json!({})).expect("旧配置反序列化应成功");
+        assert!(!migrated_cfg.grok_opencode_sync_on_switch);
+        assert!(!migrated_cfg.grok_opencode_auth_overwrite_on_switch);
     }
 
     #[test]

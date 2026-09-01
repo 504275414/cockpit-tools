@@ -9,7 +9,16 @@ import {
 import type { CodexAccountGroup } from "../services/codexAccountGroupService";
 import { splitValidityFilterValues } from "./accountValidityFilter";
 import { compareCurrentAccountFirst } from "./currentAccountSort";
+import {
+  isCodexClientReauthNoticeOnly,
+  isCodexRefreshTokenReusedAccount,
+} from "./codexSwitchAuthFailure";
 import { normalizeAccountsOverviewScope } from "./accountsOverviewFilterPersistence";
+import {
+  persistUserMemoryList,
+  readUserMemoryList,
+  USER_MEMORY_LISTS,
+} from "./userMemory";
 
 export const CODEX_PRIMARY_PLAN_FILTER_KEYS = [
   "FREE",
@@ -44,8 +53,6 @@ export const CODEX_OVERVIEW_FILTER_FIELDS = {
   sortDirection: "sort_direction",
 } as const;
 
-const CODEX_CUSTOM_SORT_ORDER_KEY =
-  "agtools.codex.accounts.custom_sort_order.v1";
 const CODEX_CUSTOM_SORT_ACTIVE_KEY =
   "agtools.codex.accounts.custom_sort_active.v1";
 
@@ -289,6 +296,10 @@ export function isCodexOverviewAccountAbnormal(
   account: CodexAccount,
 ): boolean {
   if (isCodexPendingOAuthAccount(account)) return false;
+  if (isCodexRefreshTokenReusedAccount(account)) return false;
+  // refresh_token 失效只影响官方客户端切号。只要 access_token 仍在 API
+  // 服务的安全有效期内，该账号就仍是可用账号，不应计入“授权失败”。
+  if (isCodexClientReauthNoticeOnly(account)) return false;
   if (account.requires_reauth === true) return true;
 
   const rawMessage = account.quota_error?.message?.trim() ?? "";
@@ -318,13 +329,11 @@ export function isCodexOverviewAccountAbnormal(
   return (
     statusCode === "401" ||
     errorCode === "deactivated_workspace" ||
-    errorCode === "refresh_token_reused" ||
     errorCode === "refresh_token_expired" ||
     errorCode === "refresh_token_invalidated" ||
     errorCode === "token_invalidated" ||
     errorCode === "invalid_grant" ||
     errorCode === "invalid_token" ||
-    lowerRawMessage.includes("refresh_token_reused") ||
     lowerRawMessage.includes("deactivated_workspace") ||
     lowerRawMessage.includes("refresh_token_expired") ||
     lowerRawMessage.includes("refresh_token_invalidated") ||
@@ -536,29 +545,11 @@ export function filterAndSortCodexOverviewAccounts({
 }
 
 export function readCodexCustomSortOrder(): string[] {
-  try {
-    const raw = localStorage.getItem(CODEX_CUSTOM_SORT_ORDER_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is string =>
-        typeof item === "string" && item.trim().length > 0,
-    );
-  } catch {
-    return [];
-  }
+  return readUserMemoryList(USER_MEMORY_LISTS.codexCustomSort);
 }
 
 export function writeCodexCustomSortOrder(accountIds: string[]): void {
-  try {
-    localStorage.setItem(
-      CODEX_CUSTOM_SORT_ORDER_KEY,
-      JSON.stringify(accountIds),
-    );
-  } catch {
-    // ignore persistence failures
-  }
+  persistUserMemoryList(USER_MEMORY_LISTS.codexCustomSort, accountIds);
 }
 
 export function readCodexCustomSortActive(): boolean {

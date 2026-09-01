@@ -72,6 +72,26 @@ test("direct add follows the API service free-account restriction", () => {
   assert.equal(canAddCodexAccountToLocalAccess(free, new Set(), false), true);
 });
 
+test("expired paid subscriptions follow the API service free-account restriction", () => {
+  const expiredPlus = account({
+    plan_type: "plus",
+    subscription_active_until: "2020-01-01T00:00:00Z",
+  });
+
+  assert.equal(
+    getCodexLocalAccessAccountIneligibleReason(expiredPlus, true),
+    "free_restricted",
+  );
+  assert.equal(
+    isCodexLocalAccessEligibleAccount(expiredPlus, true),
+    false,
+  );
+  assert.equal(
+    isCodexLocalAccessEligibleAccount(expiredPlus, false),
+    true,
+  );
+});
+
 test("Agent Identity imports are forced into API service without enabling global sync", () => {
   const regular = account({ id: "regular" });
   const agentIdentity = account({
@@ -98,6 +118,26 @@ test("Agent Identity imports are forced into API service without enabling global
       false,
       false,
     ),
+    [],
+  );
+});
+
+test("DeepSeek Responses accounts cannot join API service", () => {
+  const deepseek = account({
+    id: "deepseek",
+    auth_mode: "apikey",
+    api_provider_id: "deepseek",
+    api_base_url: "https://api.deepseek.com",
+    api_wire_api: "responses",
+  });
+  assert.equal(
+    getCodexLocalAccessAccountIneligibleReason(deepseek, false),
+    "deepseek_unsupported",
+  );
+  assert.equal(isCodexLocalAccessEligibleAccount(deepseek, false), false);
+  assert.equal(canAddCodexAccountToLocalAccess(deepseek, new Set(), false), false);
+  assert.deepEqual(
+    resolveImportedCodexAccountIdsForLocalAccess([deepseek], true, false),
     [],
   );
 });

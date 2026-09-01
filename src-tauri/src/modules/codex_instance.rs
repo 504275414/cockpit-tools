@@ -6,7 +6,10 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::models::codex::CodexAppSpeed;
-use crate::models::{DefaultInstanceSettings, InstanceLaunchMode, InstanceProfile, InstanceStore};
+use crate::models::{
+    CodexInstanceModelRouting, DefaultInstanceSettings, InstanceLaunchMode, InstanceProfile,
+    InstanceStore,
+};
 use crate::modules;
 use crate::modules::instance::InstanceDefaults;
 use crate::modules::instance_store;
@@ -27,6 +30,8 @@ const CODEX_SHARED_COPY_MARKER_FILE_NAME: &str = ".cockpit-tools-shared-copy";
 const CODEX_WINDOWS_APP_DATA_DIR_NAME: &str = "codex-app-data";
 #[cfg(target_os = "macos")]
 const CODEX_MACOS_APP_DATA_DIR_NAME: &str = "codex-app-data";
+#[cfg(target_os = "linux")]
+const CODEX_LINUX_APP_DATA_DIR_NAME: &str = "codex-app-data";
 #[cfg(target_os = "windows")]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
@@ -61,6 +66,7 @@ pub struct CreateInstanceParams {
     pub working_dir: Option<String>,
     pub extra_args: String,
     pub bind_account_id: Option<String>,
+    pub model_routing: Option<CodexInstanceModelRouting>,
     pub copy_source_instance_id: Option<String>,
     pub init_mode: Option<String>,
     pub launch_mode: Option<InstanceLaunchMode>,
@@ -74,6 +80,7 @@ pub struct UpdateInstanceParams {
     pub working_dir: Option<String>,
     pub extra_args: Option<String>,
     pub bind_account_id: Option<Option<String>>,
+    pub model_routing: Option<Option<CodexInstanceModelRouting>>,
     pub launch_mode: Option<InstanceLaunchMode>,
     pub app_speed: Option<CodexAppSpeed>,
 }
@@ -104,6 +111,7 @@ pub fn load_default_settings() -> Result<DefaultInstanceSettings, String> {
 
 pub fn update_default_settings(
     bind_account_id: Option<Option<String>>,
+    model_routing: Option<Option<CodexInstanceModelRouting>>,
     extra_args: Option<String>,
     follow_local_account: Option<bool>,
     launch_mode: Option<InstanceLaunchMode>,
@@ -123,6 +131,10 @@ pub fn update_default_settings(
     if let Some(bind) = bind_account_id {
         settings.bind_account_id = bind;
         settings.follow_local_account = false;
+    }
+
+    if let Some(routing) = model_routing {
+        settings.model_routing = routing;
     }
 
     if follow_local_account == Some(false) && settings.bind_account_id.is_none() {
@@ -277,6 +289,29 @@ pub fn get_macos_app_user_data_dir(codex_home: &Path) -> Result<PathBuf, String>
     let normalized = normalize_macos_codex_home_for_hash(codex_home);
     let digest = format!("{:x}", md5::compute(normalized.as_bytes()));
     Ok(root.join(digest))
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_linux_codex_home_for_hash(path: &Path) -> String {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved.to_string_lossy().to_string()
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_linux_app_user_data_dir(codex_home: &Path) -> Result<PathBuf, String> {
+    let root = get_default_instances_root_dir()?
+        .parent()
+        .ok_or("无法获取 Codex 实例根目录")?
+        .join(CODEX_LINUX_APP_DATA_DIR_NAME);
+    let normalized = normalize_linux_codex_home_for_hash(codex_home);
+    let digest = format!("{:x}", md5::compute(normalized.as_bytes()));
+    Ok(root.join(digest))
+}
+
+#[cfg(target_os = "linux")]
+pub fn delete_linux_app_user_data_dir(codex_home: &Path) -> Result<(), String> {
+    let app_user_data_dir = get_linux_app_user_data_dir(codex_home)?;
+    modules::instance::delete_instance_directory(&app_user_data_dir)
 }
 
 #[cfg(unix)]
@@ -923,6 +958,11 @@ pub fn create_instance(params: CreateInstanceParams) -> Result<InstanceProfile, 
         } else {
             params.bind_account_id
         },
+        model_routing: if create_empty {
+            None
+        } else {
+            params.model_routing
+        },
         launch_mode: params.launch_mode.unwrap_or_default(),
         app_speed: params.app_speed.unwrap_or_default(),
         created_at: Utc::now().timestamp_millis(),
@@ -974,6 +1014,9 @@ pub fn update_instance(params: UpdateInstanceParams) -> Result<InstanceProfile, 
     }
     if let Some(bind) = params.bind_account_id.clone() {
         instance.bind_account_id = bind;
+    }
+    if let Some(routing) = params.model_routing.clone() {
+        instance.model_routing = routing;
     }
     if let Some(mode) = params.launch_mode {
         instance.launch_mode = mode;
@@ -1038,6 +1081,8 @@ pub fn delete_instance(instance_id: &str) -> Result<(), String> {
         modules::instance::delete_instance_directory(&dir_path)?;
         #[cfg(target_os = "windows")]
         delete_windows_app_user_data_dir(&dir_path)?;
+        #[cfg(target_os = "linux")]
+        delete_linux_app_user_data_dir(&dir_path)?;
     }
 
     store.instances.remove(index);
@@ -1168,6 +1213,30 @@ pub async fn inject_account_to_profile(profile_dir: &Path, account_id: &str) -> 
     )
     .await
     .map(|_| ())
+}
+
+/// 用户主动启动实例时使用：每次都重新验证当前凭据，不复用上一次刷新失败结论。
+pub async fn inject_account_to_profile_for_launch(
+    profile_dir: &Path,
+    account_id: &str,
+) -> Result<(), String> {
+    modules::codex_account::prepare_account_for_instance_launch_from_auth_dir(
+        account_id,
+        Some(profile_dir),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// 启动前已完成 access_token 刷新时使用，只投影最新凭据，
+/// 不再重复使用 refresh_token；官方在线检查仅属于主动切号流程。
+pub async fn project_preflighted_account_to_profile_for_launch(
+    profile_dir: &Path,
+    account_id: &str,
+) -> Result<(), String> {
+    modules::codex_account::project_preflighted_account_for_instance_launch(account_id, profile_dir)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(all(test, windows))]

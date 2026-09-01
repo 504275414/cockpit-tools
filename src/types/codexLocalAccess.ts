@@ -8,6 +8,10 @@ export type CodexLocalAccessRequestKind =
   "text" | "image_generation" | "image_edit" | "other";
 export type CodexLocalAccessImageGenerationStatus =
   "unknown" | "available" | "unavailable" | "disabled";
+export type CodexLocalAccessImageGenerationPolicy =
+  | "inherit"
+  | "enabled"
+  | "disabled";
 
 export type CodexLocalAccessRoutingStrategy =
   | "auto"
@@ -72,6 +76,8 @@ export interface CodexLocalAccessApiKey {
   modelPrefix?: string | null;
   allowedModels: string[];
   excludedModels: string[];
+  tokenLimit?: number | null;
+  tokenUsed: number;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
@@ -79,10 +85,6 @@ export interface CodexLocalAccessApiKey {
 }
 
 export interface CodexLocalAccessTimeouts {
-  legacyRequestReadTimeoutMs: number;
-  legacyUpstreamConnectTimeoutMs: number;
-  legacyStreamIdleTimeoutMs: number;
-  legacyStreamTotalTimeoutMs: number;
   sidecarStreamOpenTimeoutMs: number;
   sidecarStreamIdleTimeoutMs: number;
   sidecarImageStreamOpenTimeoutMs: number;
@@ -118,6 +120,10 @@ export interface CodexLocalAccessCollection {
   accessScope: CodexLocalAccessScope;
   clientBaseUrlHost: CodexLocalAccessClientBaseUrlHost;
   imageGenerationMode: CodexLocalAccessImageGenerationMode;
+  imageGenerationAccountPolicies: Record<
+    string,
+    CodexLocalAccessImageGenerationPolicy
+  >;
   gatewayMode: CodexLocalAccessGatewayMode;
   upstreamProxyUrl?: string | null;
   routingStrategy: CodexLocalAccessRoutingStrategy;
@@ -196,6 +202,24 @@ export interface CodexLocalAccessStatsWindow {
   accounts: CodexLocalAccessAccountStats[];
   models: CodexLocalAccessModelStats[];
   apiKeys: CodexLocalAccessApiKeyStats[];
+}
+
+export interface CodexLocalAccessAccountWindowQuery {
+  accountId: string;
+  windowKey: string;
+  startAt: number;
+  endAt: number;
+}
+
+export interface CodexLocalAccessAccountWindowStats {
+  accountId: string;
+  windowKey: string;
+  requestCount: number;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
 }
 
 export interface CodexTokenInputBreakdown {
@@ -315,6 +339,34 @@ export interface CodexLocalAccessAccountHealth {
   cooldowns: CodexLocalAccessAccountCooldown[];
 }
 
+export interface CodexLocalAccessAccountPoolHealth {
+  apiKeyId: string;
+  apiKeyLabel: string;
+  provider: string;
+  model: string;
+  requestKind: string;
+  errorCode: string;
+  errorMessage: string;
+  diagnosticAvailable: boolean;
+  candidateAuths: number;
+  scopedAuths: number;
+  availableAuths: number;
+  unavailableAuths: number;
+  modelExcludedAuths: number;
+  quotaReservedAuths: number;
+  imagePolicyBlockedAuths: number;
+  accountStatuses: CodexLocalAccessAccountPoolMemberHealth[];
+  lastFailureAt: number;
+}
+
+export interface CodexLocalAccessAccountPoolMemberHealth {
+  accountId: string;
+  accountEmail: string;
+  available: boolean;
+  reasonCode: string;
+  reasonMessage: string;
+}
+
 export interface CodexLocalAccessProfileAttachment {
   profileDir: string;
   attached: boolean;
@@ -356,6 +408,7 @@ export interface CodexLocalAccessState {
   memberCount: number;
   stats: CodexLocalAccessStats;
   accountHealth: CodexLocalAccessAccountHealth[];
+  accountPoolHealth: CodexLocalAccessAccountPoolHealth[];
   quotaReserveStatus: CodexLocalAccessQuotaReserveStatus | null;
 }
 
@@ -364,6 +417,7 @@ export interface CodexLocalAccessAppendAccountSkipped {
   reason:
     | "not_found"
     | "chat_completions_api_key"
+    | "deepseek_unsupported"
     | "free_restricted"
     | "pending_oauth"
     | "web_session_quota_only";

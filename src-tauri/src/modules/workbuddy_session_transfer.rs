@@ -57,7 +57,9 @@ pub fn prepare_account_switch(
                     );
                 }
             }
-            Ok(None) => {}
+            Ok(None) => logger::log_warn(
+                "[WorkBuddy Session Transfer] 本机未读取到 WorkBuddy 登录信息，已跳过来源会话合并",
+            ),
             Err(error) => logger::log_warn(&format!(
                 "[WorkBuddy Session Transfer] 读取当前登录信息失败，已跳过来源会话合并: {}",
                 error
@@ -88,33 +90,35 @@ pub fn transfer_local_sessions(
     let runtime_dir_string = runtime_dir.to_string_lossy().to_string();
     let (config_dir, electron_data_dir) =
         workbuddy_instance::resolve_workbuddy_runtime_dirs(&runtime_dir_string)?;
-    let backup_root = config_dir
-        .join("Backups")
-        .join("CockpitTools")
-        .join("WorkBuddySessions")
-        .join(operation_id());
+    let backup_root = crate::modules::backup_storage::behavior_backup_dir(
+        "workbuddy",
+        &crate::modules::backup_storage::scope_for_path(runtime_dir),
+        &operation_id(),
+    )?;
 
     let mut report = WorkbuddySessionTransferReport::default();
     let extension_roots = select_extension_data_roots(source_uid)?;
     if extension_roots.is_empty() {
+        // WorkBuddy 5.x 会话统一存放在 workbuddy.db（按 user_id 区分），不存在
+        // 旧版的 per-uid 本地会话目录，因此这里只跳过目录级合并，仍需执行下方
+        // 的数据库层 user_id 重映射（这才是 WorkBuddy 真正生效的会话合并）。
         logger::log_warn(&format!(
-            "[WorkBuddy Session Transfer] 未找到来源账号会话目录，跳过数据库重映射: source_uid={}",
+            "[WorkBuddy Session Transfer] 未找到来源账号本地会话目录（uid={}），跳过目录级合并，将继续执行数据库层合并",
             source_uid
         ));
-        return Ok(report);
-    }
-
-    for (label, extension_data_dir) in extension_roots {
-        let file_report = codebuddy_session_transfer::sync_history_between_accounts(
-            &extension_data_dir,
-            source_uid,
-            target_uid,
-            &backup_root.join(label),
-        )
-        .map_err(workbuddy_error)?;
-        report.added_conversations += file_report.added_conversations;
-        report.replaced_conversations += file_report.replaced_conversations;
-        report.scanned_workspaces += file_report.scanned_workspaces;
+    } else {
+        for (label, extension_data_dir) in extension_roots {
+            let file_report = codebuddy_session_transfer::sync_history_between_accounts(
+                &extension_data_dir,
+                source_uid,
+                target_uid,
+                &backup_root.join(label),
+            )
+            .map_err(workbuddy_error)?;
+            report.added_conversations += file_report.added_conversations;
+            report.replaced_conversations += file_report.replaced_conversations;
+            report.scanned_workspaces += file_report.scanned_workspaces;
+        }
     }
 
     report.updated_session_rows += remap_workbuddy_database_user_id(
@@ -149,6 +153,10 @@ pub fn transfer_local_sessions(
         report.replaced_conversations,
         report.updated_session_rows
     ));
+    let _ = crate::modules::backup_storage::prune_behavior_backups(
+        "workbuddy",
+        &crate::modules::backup_storage::scope_for_path(runtime_dir),
+    );
     Ok(report)
 }
 

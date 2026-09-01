@@ -631,6 +631,20 @@
   flex: 1 1 280px;
 }
 
+.instance-model-routing-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--primary) 9%, var(--bg-secondary));
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* Account column */
 .instance-account {
   min-width: 0;
@@ -849,6 +863,83 @@
   font-size: 12px;
 }
 
+.instances-page .instance-model-routing {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-tertiary) 78%, var(--bg-secondary));
+}
+
+.instances-page .instance-model-routing__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.instances-page .instance-model-routing__header label {
+  margin: 0;
+}
+
+.instances-page .instance-model-routing__header .form-hint {
+  margin: 4px 0 0;
+}
+
+.instances-page .instance-model-routing__body,
+.instances-page .instance-model-routing__routes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.instances-page .instance-model-routing__route {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(190px, 1.3fr) 34px 34px;
+  gap: 8px;
+  align-items: center;
+}
+
+.instances-page .instance-model-routing__namespace,
+.instances-page .instance-model-routing__provider {
+  min-width: 0;
+}
+
+.instances-page .instance-model-routing__enabled {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.instances-page .instance-model-routing__enabled input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+}
+
+.instances-page .instance-model-routing__delete {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+}
+
+.instances-page .instance-model-routing__add {
+  align-self: flex-start;
+  height: 32px;
+}
+
+.instances-page .instance-model-routing .form-hint.warning {
+  margin: 0;
+  line-height: 1.5;
+}
+
 .instances-page .instance-codex-quick-config {
   display: flex;
   flex-direction: column;
@@ -975,6 +1066,114 @@
   font-size: 11px;
 }
 
+.instances-page .instance-codex-experimental-model {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-card) 86%, var(--bg-tertiary));
+}
+
+.instances-page .instance-codex-experimental-model__copy {
+  min-width: 0;
+}
+
+.instances-page .instance-codex-experimental-model__copy > label {
+  display: block;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.instances-page .instance-codex-experimental-model__copy .form-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.instances-page .instance-codex-experimental-model__error {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.instances-page .instance-codex-experimental-model__switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 24px;
+}
+
+.instances-page .instance-codex-experimental-model__switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.instances-page .instance-codex-experimental-model__switch-track {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background-color 0.2s ease, opacity 0.2s ease;
+}
+
+.instances-page .instance-codex-experimental-model__switch-track::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
+  transition: transform 0.2s ease;
+}
+
+.instances-page
+  .instance-codex-experimental-model__switch
+  input:checked
+  + .instance-codex-experimental-model__switch-track {
+  background: var(--primary);
+}
+
+.instances-page
+  .instance-codex-experimental-model__switch
+  input:checked
+  + .instance-codex-experimental-model__switch-track::before {
+  transform: translateX(18px);
+}
+
+.instances-page
+  .instance-codex-experimental-model__switch
+  input:focus-visible
+  + .instance-codex-experimental-model__switch-track {
+  outline: 2px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.instances-page
+  .instance-codex-experimental-model__switch
+  input:disabled
+  + .instance-codex-experimental-model__switch-track {
+  opacity: 0.55;
+}
+
+.instances-page .instance-codex-experimental-model__switch:has(input:disabled) {
+  cursor: not-allowed;
+}
+
 .instances-page .instance-codex-quick-config > .form-hint.warning {
   margin-top: 0;
   padding: 8px 10px;
@@ -1008,6 +1207,19 @@
 
   .instances-page .instance-codex-quick-fields {
     grid-template-columns: 1fr;
+  }
+
+  .instances-page .instance-codex-experimental-model {
+    align-items: flex-start;
+  }
+
+  .instances-page .instance-model-routing__route {
+    grid-template-columns: minmax(0, 1fr) 34px 34px;
+  }
+
+  .instances-page .instance-model-routing__provider {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }
 
