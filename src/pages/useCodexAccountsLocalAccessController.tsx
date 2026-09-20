@@ -17,7 +17,7 @@ import { DEFAULT_CODEX_INSTANCE_ID } from "../components/codex/CodexLaunchPrevie
 import type { MultiSelectFilterOption } from "../components/MultiSelectFilterDropdown";
 import type { SingleSelectFilterOption } from "../components/SingleSelectFilterDropdown";
 import type { CodexAccount } from "../types/codex";
-import type { CodexLocalAccessAddressKind, CodexLocalAccessCustomRoutingRule, CodexLocalAccessImageGenerationPolicy, CodexLocalAccessRoutingStrategy, CodexLocalAccessScope } from "../types/codexLocalAccess";
+import type { CodexInstanceGatewayView, CodexLocalAccessAddressKind, CodexLocalAccessCustomRoutingRule, CodexLocalAccessImageGenerationPolicy, CodexLocalAccessRoutingStrategy, CodexLocalAccessScope } from "../types/codexLocalAccess";
 import { CODEX_API_SERVICE_BIND_ID } from "../types/instance";
 import { buildCodexOverviewGroupFilterOptions, buildCodexOverviewSortOptions, buildCodexPlanFilterOptions, createCodexOverviewAccountComparator, createCodexPlanFilterCounts, filterAndSortCodexOverviewAccounts, incrementCodexPlanFilterCount, isCodexOverviewAccountAbnormal, isCodexOverviewAccountSubscriptionExpired, isCodexOverviewAccountZeroQuota } from "../utils/codexAccountOverview";
 import { summarizeCodexQuotaPool } from "../utils/codexQuotaPool";
@@ -187,6 +187,12 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
   const [clearClientAuthError, setClearClientAuthError] = useState<string | null>(
     null,
   );
+  const [instanceGateways, setInstanceGateways] = useState<
+    CodexInstanceGatewayView[]
+  >([]);
+  const [instanceGatewaysOpen, setInstanceGatewaysOpen] = useState(false);
+  const [instanceGatewaysLoading, setInstanceGatewaysLoading] = useState(false);
+  const [instanceGatewaysError, setInstanceGatewaysError] = useState("");
   const resolveQuotaErrorMeta = useCallback(
       (quotaError?: CodexQuotaErrorInfo) => {
         if (!quotaError?.message) {
@@ -708,6 +714,23 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
             health,
           ]),
         );
+        const poolUnavailableAccountIds = new Set<string>();
+        (localAccessState?.accountPoolHealth ?? []).forEach((pool) => {
+          const statuses = (pool.accountStatuses ?? []).filter((member) =>
+            member.accountId.trim(),
+          );
+          if (statuses.length === 0) {
+            (localAccessCollection?.accountIds ?? []).forEach((accountId) =>
+              poolUnavailableAccountIds.add(accountId),
+            );
+            return;
+          }
+          statuses
+            .filter((member) => !member.available)
+            .forEach((member) =>
+              poolUnavailableAccountIds.add(member.accountId.trim()),
+            );
+        });
         const summary: LocalAccessAccountPoolHealthSummary = {
           total: localAccessCollection?.accountIds.length ?? 0,
           available: 0,
@@ -716,7 +739,6 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
           missing: 0,
           authError: 0,
           quotaLimited: 0,
-          poolUnavailable: localAccessState?.accountPoolHealth?.length ?? 0,
         };
   
         (localAccessCollection?.accountIds ?? []).forEach((accountId) => {
@@ -742,6 +764,9 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
           if (health && !health.available) {
             return;
           }
+          if (poolUnavailableAccountIds.has(accountId)) {
+            return;
+          }
           summary.available += 1;
         });
   
@@ -750,14 +775,13 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
         accounts,
         localAccessCollection?.accountIds,
         localAccessState?.accountHealth,
-        localAccessState?.accountPoolHealth?.length,
+        localAccessState?.accountPoolHealth,
       ]);
     const localAccessAccountPoolHealthHasIssue =
       localAccessAccountPoolHealthSummary.available <
-        localAccessAccountPoolHealthSummary.total ||
+      localAccessAccountPoolHealthSummary.total ||
       localAccessAccountPoolHealthSummary.abnormal > 0 ||
-      localAccessAccountPoolHealthSummary.cooldown > 0 ||
-      localAccessAccountPoolHealthSummary.poolUnavailable > 0;
+      localAccessAccountPoolHealthSummary.cooldown > 0;
     const localAccessQuotaPoolLabels = useMemo(
       () => ({
         weekly: t("codex.localAccess.quotaPool.weeklyShort", "周"),
@@ -774,7 +798,15 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
       localAccessQuotaPoolSummary.visiblePlans.length -
         localAccessQuotaPreviewItems.length,
     );
-    const overviewAccounts = accounts;
+    // Grok 供应商账号在「添加至 API 服务」里以 Grok 平台行呈现，
+    // 不在账号总览里单独占一行（成员弹框仍拿到完整账号列表）。
+    const overviewAccounts = useMemo(
+      () =>
+        accounts.filter(
+          (account) => !account.upstream_grok_account_id?.trim(),
+        ),
+      [accounts],
+    );
     const localAccessScope = localAccessCollection?.accessScope ?? "localhost";
     const localAccessScopeLabel =
       localAccessScope === "lan"
@@ -858,6 +890,108 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
       setLocalAccessModalMode("panel");
       setShowLocalAccessModal(true);
     }, []);
+
+    const refreshInstanceGateways = useCallback(async () => {
+      setInstanceGatewaysLoading(true);
+      setInstanceGatewaysError("");
+      try {
+        const gateways =
+          await codexLocalAccessService.listCodexInstanceGateways();
+        setInstanceGateways(gateways);
+      } catch (error) {
+        console.error("Failed to load Codex instance gateways:", error);
+        setInstanceGateways([]);
+        setInstanceGatewaysError(String(error).replace(/^Error:\s*/, ""));
+      } finally {
+        setInstanceGatewaysLoading(false);
+      }
+    }, []);
+
+    const openInstanceGateways = useCallback(() => {
+      setInstanceGatewaysOpen(true);
+      void refreshInstanceGateways();
+    }, [refreshInstanceGateways]);
+
+    /** 关闭单个实例网关；混合模型路由网关会同时关闭该实例的路由（渠道配置保留）。 */
+    const stopInstanceGateway = useCallback(
+      async (gateway: CodexInstanceGatewayView): Promise<boolean> => {
+        const confirmed = await confirmDialog(
+          t(
+            "codex.instanceGateways.stopConfirmDescription",
+            "混合模型路由网关会同时停用该实例的混合模型路由（渠道配置保留）；其他网关关闭后可在需要时点击“重启”。",
+          ),
+          {
+            title: t(
+              "codex.instanceGateways.stopConfirmTitle",
+              "关闭该实例网关？",
+            ),
+            okLabel: t("codex.instanceGateways.stop", "关闭"),
+            cancelLabel: t("common.cancel", "取消"),
+            kind: "warning",
+          },
+        );
+        if (!confirmed) return false;
+        setInstanceGatewaysError("");
+        try {
+          await codexLocalAccessService.stopCodexInstanceGateway(
+            gateway.instanceId,
+            gateway.kind,
+          );
+          await refreshInstanceGateways();
+          return true;
+        } catch (actionError) {
+          setInstanceGatewaysError(
+            t("codex.instanceGateways.stopFailed", {
+              defaultValue: "关闭网关失败：{{error}}",
+              error: String(actionError).replace(/^Error:\s*/, ""),
+            }),
+          );
+          return false;
+        }
+      },
+      [refreshInstanceGateways, t],
+    );
+
+    /** 重启单个实例网关（按当前绑定账号 / 混合路由配置重建）。 */
+    const restartInstanceGateway = useCallback(
+      async (gateway: CodexInstanceGatewayView): Promise<boolean> => {
+        setInstanceGatewaysError("");
+        try {
+          await codexLocalAccessService.restartCodexInstanceGateway(
+            gateway.instanceId,
+            gateway.kind,
+          );
+          await refreshInstanceGateways();
+          return true;
+        } catch (actionError) {
+          setInstanceGatewaysError(
+            t("codex.instanceGateways.restartFailed", {
+              defaultValue: "重启网关失败：{{error}}",
+              error: String(actionError).replace(/^Error:\s*/, ""),
+            }),
+          );
+          return false;
+        }
+      },
+      [refreshInstanceGateways, t],
+    );
+
+    const closeInstanceGateways = useCallback(() => {
+      setInstanceGatewaysOpen(false);
+    }, []);
+
+    // 卡片入口需要先拿到概览状态，才能在打开弹框前显示数量与异常提示。
+    useEffect(() => {
+      void refreshInstanceGateways();
+    }, [refreshInstanceGateways]);
+
+    const instanceGatewaySummary = useMemo(() => {
+      const total = instanceGateways.length;
+      const running = instanceGateways.filter(
+        (gateway) => gateway.status === "running",
+      ).length;
+      return { total, running, issues: Math.max(0, total - running) };
+    }, [instanceGateways]);
   
     const openCodexApiServicePage = useCallback(() => {
       setShowLocalAccessModal(false);
@@ -1712,7 +1846,10 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
     }, [localAccessCollection, requestLocalAccessRiskNotice, setMessage, t]);
   
     const handleActivateLocalAccess = useCallback(
-      async (options?: { showSuccessMessage?: boolean }) => {
+      async (options?: {
+        showSuccessMessage?: boolean;
+        instanceId?: string | null;
+      }) => {
         if (!localAccessCollection) {
           throw new Error(
             t("codex.localAccess.testUnavailable", "当前 API 服务地址不可用"),
@@ -1746,7 +1883,9 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
         setLocalAccessStarting(true);
         try {
           const nextState =
-            await codexLocalAccessService.activateCodexLocalAccess();
+            await codexLocalAccessService.activateCodexLocalAccess(
+              options?.instanceId,
+            );
           setLocalAccessState(nextState);
           await fetchCurrentAccount();
           setLocalAccessLaunchCurrent(true);
@@ -1810,7 +1949,9 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
               deferBindAccountApplication: true,
             });
           }
-          return await handleActivateLocalAccess();
+          return await handleActivateLocalAccess({
+            instanceId: launchPreviewInstanceId,
+          });
         };
         try {
           const state = await activateSelectedTarget();
@@ -1951,6 +2092,16 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
     handleUpdateLocalAccessRoutingStrategy,
     handleUpdateLocalAccessUpstreamProxyConfig,
     isAbnormalAccount,
+    instanceGatewaySummary,
+    instanceGateways,
+    instanceGatewaysError,
+    instanceGatewaysLoading,
+    instanceGatewaysOpen,
+    closeInstanceGateways,
+    openInstanceGateways,
+    refreshInstanceGateways,
+    stopInstanceGateway,
+    restartInstanceGateway,
     localAccessAccountIdSet,
     localAccessAccountPoolHealthHasIssue,
     localAccessAccountPoolHealthSummary,

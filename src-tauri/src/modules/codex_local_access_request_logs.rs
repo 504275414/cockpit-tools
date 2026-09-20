@@ -1157,6 +1157,7 @@ async fn apply_reprice_changes_to_runtime_stats(changes: &[RequestLogRepriceChan
         let mut runtime = gateway_runtime().lock().await;
         apply_reprice_changes_to_stats(&mut runtime.stats, changes);
         runtime.stats_dirty = true;
+        runtime.stats_revision = runtime.stats_revision.wrapping_add(1);
     }
     schedule_stats_flush_if_needed().await;
 }
@@ -1510,18 +1511,33 @@ fn usage_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexLocalA
     })
 }
 
-fn load_local_access_usage_events_since(
+fn for_each_local_access_usage_event_since<F>(
     since: i64,
-) -> Result<Vec<CodexLocalAccessUsageEvent>, String> {
+    on_event: F,
+) -> Result<(), String>
+where
+    F: FnMut(CodexLocalAccessUsageEvent) -> Result<(), String>,
+{
     let conn = open_local_access_logs_db()?;
-    let service_tier_select = if request_logs_has_service_tier_column(&conn)
+    for_each_local_access_usage_event_since_from_conn(&conn, since, on_event)
+}
+
+fn for_each_local_access_usage_event_since_from_conn<F>(
+    conn: &Connection,
+    since: i64,
+    mut on_event: F,
+) -> Result<(), String>
+where
+    F: FnMut(CodexLocalAccessUsageEvent) -> Result<(), String>,
+{
+    let service_tier_select = if request_logs_has_service_tier_column(conn)
         .map_err(|e| format!("检查 API 服务日志 service_tier 列失败: {}", e))?
     {
         "service_tier"
     } else {
         "'' AS service_tier"
     };
-    let reasoning_effort_select = if request_logs_has_column(&conn, "reasoning_effort")
+    let reasoning_effort_select = if request_logs_has_column(conn, "reasoning_effort")
         .map_err(|e| format!("检查 API 服务日志 reasoning_effort 列失败: {}", e))?
     {
         "reasoning_effort"
@@ -1570,8 +1586,11 @@ fn load_local_access_usage_events_since(
     let rows = stmt
         .query_map(params![since], usage_event_from_row)
         .map_err(|e| format!("读取 API 服务日志失败: {}", e))?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("解析 API 服务日志失败: {}", e))
+    for row in rows {
+        let event = row.map_err(|e| format!("解析 API 服务日志失败: {}", e))?;
+        on_event(event)?;
+    }
+    Ok(())
 }
 
 fn local_calendar_window_starts(now: i64) -> (i64, i64, i64) {
@@ -1907,16 +1926,23 @@ fn query_local_access_stats_window_blocking(
         .prepare(sql.as_str())
         .map_err(|e| format!("准备 API 服务统计查询失败: {}", e))?;
     let mut window = empty_stats_window(start_at, start_at);
+    let hourly_trend = end_at.saturating_sub(start_at) <= 36 * 60 * 60 * 1000;
+    let mut trend = HashMap::new();
     let rows = statement
         .query_map(params![start_at, end_at], usage_event_from_row)
         .map_err(|e| format!("查询 API 服务统计失败: {}", e))?;
     for row in rows {
         let event = row.map_err(|e| format!("解析 API 服务统计失败: {}", e))?;
         apply_usage_event_to_window(&mut window, &event);
+        apply_usage_event_to_trend(&mut trend, &event, hourly_trend);
     }
     sort_usage_accounts(&mut window.accounts);
     sort_usage_models(&mut window.models);
     sort_usage_api_keys(&mut window.api_keys);
+    let mut trend = trend.into_values().collect::<Vec<_>>();
+    trend.sort_by_key(|point| point.bucket_start);
+    window.trend = trend;
+    window.trend_hourly = hourly_trend;
     Ok(window)
 }
 
@@ -2152,11 +2178,11 @@ fn apply_usage_event_to_stats(
         };
         stats.updated_at = stats.updated_at.max(event.timestamp);
     }
-    stats.events.push(event.clone());
+    push_recent_usage_event(&mut stats.events, event.clone());
 }
 
 fn rebuild_stats_from_request_logs() -> Result<CodexLocalAccessStats, String> {
-    let events = load_local_access_usage_events_since(0)?;
+    let now = now_ms();
     let mut stats = empty_stats_snapshot();
     stats.since = 0;
     stats.updated_at = 0;
@@ -2165,10 +2191,17 @@ fn rebuild_stats_from_request_logs() -> Result<CodexLocalAccessStats, String> {
     stats.models.clear();
     stats.api_keys.clear();
     stats.events.clear();
-    for event in &events {
-        apply_usage_event_to_stats(&mut stats, event);
+    ensure_stats_windows_current(&mut stats, now);
+    for_each_local_access_usage_event_since(0, |event| {
+        apply_usage_event_to_stats(&mut stats, &event);
+        apply_usage_event_to_current_windows(&mut stats, &event, now);
+        Ok(())
+    })?;
+    sort_stats_rows(&mut stats);
+    if stats.since <= 0 {
+        stats.since = now;
     }
-    normalize_stats(&mut stats);
+    stats.updated_at = stats.updated_at.max(now);
     Ok(stats)
 }
 
@@ -2242,8 +2275,19 @@ fn append_usage_event(
             .unwrap_or_default(),
         cached_input_usd_per_million: pricing.and_then(|item| item.cached_input_usd_per_million),
     };
-    events.push(event.clone());
+    push_recent_usage_event(events, event.clone());
     event
+}
+
+fn push_recent_usage_event(
+    events: &mut Vec<CodexLocalAccessUsageEvent>,
+    event: CodexLocalAccessUsageEvent,
+) {
+    events.push(event);
+    if events.len() > STATE_RECENT_USAGE_EVENT_LIMIT {
+        let remove_count = events.len() - STATE_RECENT_USAGE_EVENT_LIMIT;
+        events.drain(..remove_count);
+    }
 }
 
 fn apply_usage_event_to_window(
@@ -2303,6 +2347,147 @@ fn apply_usage_event_to_window(
         event.timestamp,
     );
     window.updated_at = window.updated_at.max(event.timestamp);
+}
+
+fn usage_trend_bucket_start(timestamp: i64, hourly: bool) -> i64 {
+    let local = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp)
+        .unwrap_or_else(chrono::Utc::now)
+        .with_timezone(&Local);
+    if !hourly {
+        return local_date_start_ms(local.date_naive());
+    }
+    let hour = local
+        .date_naive()
+        .and_hms_opt(local.hour(), 0, 0)
+        .expect("a local hour must be valid");
+    match Local.from_local_datetime(&hour) {
+        LocalResult::Single(value) => value.timestamp_millis(),
+        LocalResult::Ambiguous(first, second) => {
+            first.timestamp_millis().min(second.timestamp_millis())
+        }
+        LocalResult::None => local_date_start_ms(local.date_naive()),
+    }
+}
+
+fn apply_usage_event_to_trend(
+    trend: &mut HashMap<i64, CodexLocalAccessUsageTrendPoint>,
+    event: &CodexLocalAccessUsageEvent,
+    hourly: bool,
+) {
+    let bucket_start = usage_trend_bucket_start(event.timestamp, hourly);
+    let point = trend
+        .entry(bucket_start)
+        .or_insert_with(|| CodexLocalAccessUsageTrendPoint {
+            bucket_start,
+            usage: CodexLocalAccessUsageStats::default(),
+        });
+    let usage = UsageCapture {
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        total_tokens: event.total_tokens,
+        cached_tokens: event.cached_tokens,
+        reasoning_tokens: event.reasoning_tokens,
+        token_breakdown: event.token_breakdown.clone(),
+    };
+    apply_usage_stats(
+        &mut point.usage,
+        event.request_kind,
+        event.success,
+        Some(event.error_category.as_str()),
+        event.latency_ms,
+        Some(&usage),
+        event.estimated_cost_usd,
+    );
+}
+
+fn ensure_stats_windows_current(stats: &mut CodexLocalAccessStats, now: i64) {
+    let (day_since, week_since, month_since) = local_calendar_window_starts(now);
+    let updated_at = stats.updated_at.max(now);
+    if stats.daily.since != day_since {
+        stats.daily = empty_stats_window(day_since, updated_at);
+    }
+    if stats.weekly.since != week_since {
+        stats.weekly = empty_stats_window(week_since, updated_at);
+    }
+    if stats.monthly.since != month_since {
+        stats.monthly = empty_stats_window(month_since, updated_at);
+    }
+}
+
+fn apply_usage_event_to_current_windows(
+    stats: &mut CodexLocalAccessStats,
+    event: &CodexLocalAccessUsageEvent,
+    now: i64,
+) {
+    ensure_stats_windows_current(stats, now);
+    if event.timestamp >= stats.monthly.since {
+        apply_usage_event_to_window(&mut stats.monthly, event);
+    }
+    if event.timestamp >= stats.weekly.since {
+        apply_usage_event_to_window(&mut stats.weekly, event);
+    }
+    if event.timestamp >= stats.daily.since {
+        apply_usage_event_to_window(&mut stats.daily, event);
+    }
+}
+
+fn load_stats_windows_and_recent_events_from_conn(
+    conn: &Connection,
+    now: i64,
+) -> Result<
+    (
+        CodexLocalAccessStatsWindow,
+        CodexLocalAccessStatsWindow,
+        CodexLocalAccessStatsWindow,
+        Vec<CodexLocalAccessUsageEvent>,
+    ),
+    String,
+> {
+    let (day_since, week_since, month_since) = local_calendar_window_starts(now);
+    let mut daily = empty_stats_window(day_since, day_since);
+    let mut weekly = empty_stats_window(week_since, week_since);
+    let mut monthly = empty_stats_window(month_since, month_since);
+    let mut recent_events = Vec::with_capacity(STATE_RECENT_USAGE_EVENT_LIMIT);
+
+    for_each_local_access_usage_event_since_from_conn(
+        conn,
+        week_since.min(month_since),
+        |event| {
+            if event.timestamp >= month_since {
+                apply_usage_event_to_window(&mut monthly, &event);
+            }
+            if event.timestamp >= week_since {
+                apply_usage_event_to_window(&mut weekly, &event);
+            }
+            if event.timestamp >= day_since {
+                apply_usage_event_to_window(&mut daily, &event);
+            }
+            push_recent_usage_event(&mut recent_events, event);
+            Ok(())
+        },
+    )?;
+
+    for window in [&mut daily, &mut weekly, &mut monthly] {
+        sort_usage_accounts(&mut window.accounts);
+        sort_usage_models(&mut window.models);
+        sort_usage_api_keys(&mut window.api_keys);
+    }
+    Ok((daily, weekly, monthly, recent_events))
+}
+
+fn load_stats_windows_and_recent_events(
+    now: i64,
+) -> Result<
+    (
+        CodexLocalAccessStatsWindow,
+        CodexLocalAccessStatsWindow,
+        CodexLocalAccessStatsWindow,
+        Vec<CodexLocalAccessUsageEvent>,
+    ),
+    String,
+> {
+    let conn = open_local_access_logs_db()?;
+    load_stats_windows_and_recent_events_from_conn(&conn, now)
 }
 
 fn recompute_time_windows(stats: &mut CodexLocalAccessStats, now: i64) {
@@ -2469,4 +2654,3 @@ fn apply_reprice_changes_to_stats(
     sort_usage_models(&mut stats.monthly.models);
     sort_usage_api_keys(&mut stats.monthly.api_keys);
 }
-

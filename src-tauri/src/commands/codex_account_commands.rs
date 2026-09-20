@@ -598,11 +598,12 @@ fn codex_launch_credential_snapshot_for_account_id(
         .map(|account| codex_launch_credential_snapshot_for_account(&account, source_prefix))
 }
 
-fn read_current_codex_launch_credential_snapshot() -> Option<CodexLaunchCredentialSnapshot> {
-    let codex_home = codex_account::get_codex_home();
-    if let Some(account_id) =
-        codex_account::read_managed_projection_account_id_from_dir(&codex_home)
-    {
+fn read_codex_launch_credential_snapshot_for_dir(
+    base_dir: &Path,
+    bind_account_id: Option<&str>,
+    include_current_index: bool,
+) -> Option<CodexLaunchCredentialSnapshot> {
+    if let Some(account_id) = codex_account::read_managed_projection_account_id_from_dir(base_dir) {
         if let Some(snapshot) =
             codex_launch_credential_snapshot_for_account_id(&account_id, "profile:")
         {
@@ -610,19 +611,37 @@ fn read_current_codex_launch_credential_snapshot() -> Option<CodexLaunchCredenti
         }
     }
 
-    if let Ok(settings) = crate::modules::codex_instance::load_default_settings() {
-        if let Some(bind_account_id) = settings.bind_account_id.as_deref() {
-            if let Some(snapshot) =
-                codex_launch_credential_snapshot_for_account_id(bind_account_id, "default-bind:")
-            {
-                return Some(snapshot);
-            }
+    // The official client may keep the current OAuth snapshot in Keychain or its
+    // profile auth store even when the managed projection marker is missing.
+    // Prefer that runtime evidence before falling back to the instance binding.
+    if let Some(account_id) = codex_account::oauth_account_id_for_runtime_dir(base_dir) {
+        if let Some(snapshot) =
+            codex_launch_credential_snapshot_for_account_id(&account_id, "runtime-oauth:")
+        {
+            return Some(snapshot);
         }
     }
 
-    codex_account::get_current_account()
-        .as_ref()
-        .map(|account| codex_launch_credential_snapshot_for_account(account, "current-index:"))
+    if let Some(bind_account_id) = bind_account_id {
+        if let Some(snapshot) =
+            codex_launch_credential_snapshot_for_account_id(bind_account_id, "bind:")
+        {
+            return Some(snapshot);
+        }
+    }
+
+    include_current_index
+        .then(codex_account::get_current_account)
+        .flatten()
+        .map(|account| codex_launch_credential_snapshot_for_account(&account, "current-index:"))
+}
+
+fn read_current_codex_launch_credential_snapshot() -> Option<CodexLaunchCredentialSnapshot> {
+    let codex_home = codex_account::get_codex_home();
+    let bind_account_id = crate::modules::codex_instance::load_default_settings()
+        .ok()
+        .and_then(|settings| settings.bind_account_id);
+    read_codex_launch_credential_snapshot_for_dir(&codex_home, bind_account_id.as_deref(), true)
 }
 
 fn repair_codex_session_visibility_after_credential_kind_change(
@@ -735,6 +754,20 @@ pub async fn get_codex_quick_config() -> Result<CodexQuickConfig, String> {
 }
 
 #[tauri::command]
+pub async fn save_codex_context_management(
+    experimental_mode: bool,
+) -> Result<CodexQuickConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        codex_account::save_context_management_for_base_dir(
+            &codex_account::get_codex_home(),
+            experimental_mode,
+        )
+    })
+    .await
+    .map_err(|error| format!("保存 Codex 上下文管理开关后台任务失败: {}", error))?
+}
+
+#[tauri::command]
 pub async fn save_codex_quick_config(
     model_context_window: Option<i64>,
     auto_compact_token_limit: Option<i64>,
@@ -757,6 +790,27 @@ pub async fn save_codex_quick_config(
     })
     .await
     .map_err(|error| format!("保存 Codex 快捷配置后台任务失败: {}", error))??;
+    crate::modules::codex_local_access::trigger_gateway_reload_in_background("实验模型目录已更新");
+    Ok(saved)
+}
+
+#[tauri::command]
+pub async fn save_codex_model_catalog(
+    experimental_model_catalog_enabled: bool,
+    experimental_model_catalog_models: Vec<crate::models::codex::CodexExperimentalModelDefinition>,
+    experimental_model_catalog_default_model_id: Option<String>,
+) -> Result<CodexQuickConfig, String> {
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        let saved = codex_account::save_current_model_catalog_preserving_context(
+            experimental_model_catalog_enabled,
+            experimental_model_catalog_models,
+            experimental_model_catalog_default_model_id,
+        )?;
+        crate::modules::codex_local_access::refresh_api_service_experimental_model_ids();
+        Ok::<CodexQuickConfig, String>(saved)
+    })
+    .await
+    .map_err(|error| format!("保存 Codex 可见模型后台任务失败: {}", error))??;
     crate::modules::codex_local_access::trigger_gateway_reload_in_background("实验模型目录已更新");
     Ok(saved)
 }
@@ -898,6 +952,39 @@ pub async fn codex_clear_client_auth_observation(account_id: String) -> Result<b
 }
 
 /// 切换 Codex 账号（包含 token 刷新检查）
+/// 默认实例切换到非 OAuth 账号时，关闭它的混合模型路由并释放对应的实例网关。
+///
+/// 混合路由只在绑定「可直接登录的 OAuth 订阅账号」时有意义，切换账号不应该被它拦住。
+async fn disable_default_model_routing_for_non_oauth_switch() {
+    let routing_enabled = crate::modules::codex_instance::load_default_settings()
+        .ok()
+        .and_then(|settings| settings.model_routing)
+        .is_some_and(|routing| routing.enabled);
+    if !routing_enabled {
+        return;
+    }
+    if let Err(error) = crate::modules::codex_instance::disable_model_routing(
+        crate::modules::codex_instance::CODEX_DEFAULT_INSTANCE_ID,
+    ) {
+        logger::log_warn(&format!(
+            "[Codex切号] 关闭默认实例混合模型路由失败: {}",
+            error
+        ));
+        return;
+    }
+    if let Ok(default_dir) = crate::modules::codex_instance::get_default_codex_home() {
+        if let Err(error) =
+            crate::modules::codex_local_access::release_instance_gateway_for_profile(&default_dir)
+                .await
+        {
+            logger::log_warn(&format!(
+                "[Codex切号] 停止默认实例混合模型路由网关失败: {}",
+                error
+            ));
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn switch_codex_account(
     app: AppHandle,
@@ -935,6 +1022,11 @@ pub async fn switch_codex_account(
     let is_oauth_account = !initial_account.is_api_key_auth()
         && !initial_account.is_agent_identity_auth()
         && !initial_account.is_web_session_auth();
+    if !is_oauth_account {
+        // 默认实例切到普通 API Key / 其他非 OAuth 账号时，混合模型路由必须自动关闭：
+        // 路由的底座账号已经不存在，继续保留会拦住启动，并让后台监控反复尝试恢复网关。
+        disable_default_model_routing_for_non_oauth_switch().await;
+    }
     let access_token_present = !initial_account.tokens.access_token.trim().is_empty();
     let refresh_token_present = codex_account::account_has_refresh_token(&initial_account);
     let access_token_expires_at =
@@ -1124,7 +1216,11 @@ pub async fn switch_codex_account(
     if is_reauth_handoff {
         let quota_account_id = account.id.clone();
         tokio::spawn(async move {
-            if let Err(error) = codex_quota::refresh_account_quota(&quota_account_id).await {
+            if let Err(error) = Box::pin(codex_quota::refresh_account_quota_background(
+                &quota_account_id,
+            ))
+            .await
+            {
                 logger::log_warn(&format!(
                     "重新授权切号完成后刷新配额失败: account_id={}, error={}",
                     quota_account_id, error
@@ -1390,7 +1486,15 @@ async fn run_codex_post_refresh_checks(app: &AppHandle) {
     match codex_account::pick_auto_switch_target_if_needed() {
         Ok(Some(target)) => {
             let target_id = target.id.clone();
-            match switch_codex_account(app.clone(), target_id.clone(), None, None, None).await
+            // Keep the large switch state machine out of the post-refresh Future.
+            match Box::pin(switch_codex_account(
+                app.clone(),
+                target_id.clone(),
+                None,
+                None,
+                None,
+            ))
+            .await
             {
                 Ok(switched_account) => {
                     logger::log_info(&format!(
@@ -1558,7 +1662,7 @@ fn apply_codex_switch_auth_projections(account: &CodexAccount, user_config: &con
 }
 
 /// Re-activate current account after import when needed, then project auth side effects.
-async fn reactivate_imported_current_if_needed(imported: &[CodexAccount]) {
+pub(crate) async fn reactivate_imported_current_if_needed(imported: &[CodexAccount]) {
     if let Some(account) = codex_account::reactivate_if_imported_matches_current(imported).await {
         let user_config = config::get_user_config();
         apply_codex_switch_auth_projections(&account, &user_config);
@@ -1568,7 +1672,7 @@ async fn reactivate_imported_current_if_needed(imported: &[CodexAccount]) {
     }
 }
 
-async fn refresh_imported_codex_accounts(
+pub(crate) async fn refresh_imported_codex_accounts(
     app: &AppHandle,
     accounts: Vec<CodexAccount>,
 ) -> Vec<CodexAccount> {
@@ -1583,7 +1687,7 @@ async fn refresh_imported_codex_accounts(
         }
 
         attempted = true;
-        match codex_quota::refresh_account_quota(&account.id).await {
+        match Box::pin(codex_quota::refresh_account_quota(&account.id)).await {
             Ok(_) => {
                 success_count += 1;
             }
@@ -1599,7 +1703,7 @@ async fn refresh_imported_codex_accounts(
     }
 
     if success_count > 0 {
-        run_codex_post_refresh_checks(app).await;
+        Box::pin(run_codex_post_refresh_checks(app)).await;
     }
     if attempted || !result.is_empty() {
         let _ = crate::modules::tray::update_tray_menu(app);
@@ -1631,10 +1735,34 @@ pub async fn import_codex_access_token_account(
         .ok_or_else(|| "Account could not be loaded after import".to_string())
 }
 
+/// 解析「获取本地账号」要读取的 profile 目录。
+///
+/// 未指定实例（默认实例）时读取默认 `CODEX_HOME`；指定多开实例时读取该实例自己的
+/// profile 目录，避免多开场景下只能拿到默认实例的本地账号。
+fn resolve_codex_local_import_dir(instance_id: Option<&str>) -> Result<PathBuf, String> {
+    match instance_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(instance_id) => {
+            crate::modules::codex_instance::profile_dir_for_instance(instance_id)
+        }
+        None => Ok(crate::modules::codex_account::get_codex_home()),
+    }
+}
+
 /// 从官方 Codex 本机凭据存储导入账号（auth.json / macOS Keychain）
+///
+/// `instance_id` 为空表示默认实例；传入多开实例 ID 时读取该实例 profile 目录下的凭据。
 #[tauri::command]
-pub async fn import_codex_from_local(app: AppHandle) -> Result<CodexAccount, String> {
-    let account = codex_account::import_from_local()?;
+pub async fn import_codex_from_local(
+    app: AppHandle,
+    instance_id: Option<String>,
+) -> Result<CodexAccount, String> {
+    let base_dir = resolve_codex_local_import_dir(instance_id.as_deref())?;
+    logger::log_info(&format!(
+        "Codex 获取本地账号: instance_id={}, profile_dir={}",
+        instance_id.as_deref().unwrap_or("<default>"),
+        base_dir.display()
+    ));
+    let account = codex_account::import_from_local_at(&base_dir)?;
     reactivate_imported_current_if_needed(std::slice::from_ref(&account)).await;
     let mut accounts = refresh_imported_codex_accounts(&app, vec![account]).await;
     accounts
@@ -1716,9 +1844,12 @@ pub async fn confirm_codex_batch_import(
 /// 刷新单个账号配额
 #[tauri::command]
 pub async fn refresh_codex_quota(app: AppHandle, account_id: String) -> Result<CodexQuota, String> {
-    let result = codex_quota::refresh_account_quota(&account_id).await;
+    // Box child Futures before awaiting them: boxing only the outer spawned IPC
+    // task still constructs/moves its large inline state machine on the stack.
+    // Keep the async command signature so Tauri uses its existing async wrapper.
+    let result = Box::pin(codex_quota::refresh_account_quota(&account_id)).await;
     if result.is_ok() {
-        run_codex_post_refresh_checks(&app).await;
+        Box::pin(run_codex_post_refresh_checks(&app)).await;
         let _ = crate::modules::tray::update_tray_menu(&app);
     }
     result
@@ -1765,9 +1896,9 @@ pub async fn refresh_current_codex_quota(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let result = codex_quota::refresh_account_quota(&account.id).await;
+    let result = Box::pin(codex_quota::refresh_account_quota(&account.id)).await;
     if result.is_ok() {
-        run_codex_post_refresh_checks(&app).await;
+        Box::pin(run_codex_post_refresh_checks(&app)).await;
         let _ = crate::modules::tray::update_tray_menu(&app);
         Ok(())
     } else {
@@ -1780,10 +1911,10 @@ pub async fn refresh_current_codex_quota(app: AppHandle) -> Result<(), String> {
 /// 刷新所有账号配额
 #[tauri::command]
 pub async fn refresh_all_codex_quotas(app: AppHandle) -> Result<i32, String> {
-    let results = codex_quota::refresh_all_quotas().await?;
+    let results = Box::pin(codex_quota::refresh_all_quotas()).await?;
     let success_count = results.iter().filter(|(_, r)| r.is_ok()).count();
     if success_count > 0 {
-        run_codex_post_refresh_checks(&app).await;
+        Box::pin(run_codex_post_refresh_checks(&app)).await;
     }
     let _ = crate::modules::tray::update_tray_menu(&app);
     Ok(success_count as i32)
@@ -1799,13 +1930,25 @@ pub async fn refresh_codex_quotas_batch(
     app: AppHandle,
     account_ids: Vec<String>,
     respect_group_quota_refresh: Option<bool>,
+    background: Option<bool>,
 ) -> Result<i32, String> {
     let respect = respect_group_quota_refresh.unwrap_or(true);
-    let results =
-        codex_quota::refresh_quotas_for_account_ids_with_options(&account_ids, respect).await?;
+    let results = if background.unwrap_or(false) {
+        Box::pin(codex_quota::refresh_quotas_for_account_ids_in_background(
+            &account_ids,
+            respect,
+        ))
+        .await?
+    } else {
+        Box::pin(codex_quota::refresh_quotas_for_account_ids_with_options(
+            &account_ids,
+            respect,
+        ))
+        .await?
+    };
     let success_count = results.iter().filter(|(_, r)| r.is_ok()).count();
     if success_count > 0 {
-        run_codex_post_refresh_checks(&app).await;
+        Box::pin(run_codex_post_refresh_checks(&app)).await;
     }
     let _ = crate::modules::tray::update_tray_menu(&app);
     Ok(success_count as i32)
@@ -2025,6 +2168,30 @@ pub fn update_codex_account_name(account_id: String, name: String) -> Result<Cod
     codex_account::update_account_name(&account_id, name)
 }
 
+/// 通过 Grok 平台账号添加 Codex 供应商账号。
+///
+/// 账号自身不保存上游 API Key：运行态使用绑定的 Grok 平台账号 OAuth 令牌。
+#[tauri::command]
+pub fn add_codex_account_from_grok(
+    grok_account_id: String,
+    api_model_catalog: Option<Vec<String>>,
+    account_name: Option<String>,
+) -> Result<CodexAccount, String> {
+    let grok_id = grok_account_id.trim();
+    if grok_id.is_empty() {
+        return Err("请选择要绑定的 Grok 账号".to_string());
+    }
+    let grok_account = grok_account::load_account(grok_id)
+        .ok_or_else(|| "Grok 账号不存在，请先在 Grok 页面登录".to_string())?;
+    let account = codex_account::upsert_grok_provider_account(
+        &grok_account.id,
+        &grok_account.email,
+        api_model_catalog,
+        account_name,
+    )?;
+    codex_account::load_account(&account.id).ok_or_else(|| "账号保存后无法读取".to_string())
+}
+
 #[tauri::command]
 pub fn update_codex_api_key_credentials(
     account_id: String,
@@ -2113,31 +2280,21 @@ pub async fn update_codex_account_tags(
     codex_account::update_account_tags(&account_id, tags)
 }
 
-#[tauri::command]
-pub async fn update_codex_accounts_fingerprint_mode(
-    account_ids: Vec<String>,
-    mode: String,
-) -> Result<Vec<CodexAccount>, String> {
-    codex_account::update_accounts_fingerprint_mode(&account_ids, mode)
-}
-
-#[tauri::command]
-pub async fn update_codex_account_client_policy(
-    account_id: String,
-    codex_cli_only: bool,
-    allow_app_server: bool,
-) -> Result<CodexAccount, String> {
-    codex_account::update_account_client_policy(&account_id, codex_cli_only, allow_app_server)
-}
 
 #[tauri::command]
 pub async fn update_codex_account_instance_access(
     account_id: String,
     access_mode: Option<String>,
     startup_model: Option<String>,
+    image_generation_account_ids: Option<Vec<String>>,
 ) -> Result<CodexAccount, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        codex_account::update_account_instance_access(&account_id, access_mode, startup_model)
+        codex_account::update_account_instance_access(
+            &account_id,
+            access_mode,
+            startup_model,
+            image_generation_account_ids,
+        )
     })
     .await
     .map_err(|error| format!("保存 DeepSeek 接入方式失败: {}", error))?
@@ -2397,4 +2554,25 @@ pub async fn codex_wakeup_run_enabled_tasks(
     codex_wakeup_scheduler::run_enabled_tasks_now(Some(&app), &trigger).await
 }
 
+/// 启动时根据配置自动恢复可见模型目录与代理接管状态
+#[tauri::command]
+pub async fn restore_codex_active_takeover_if_enabled(app: AppHandle) -> Result<bool, String> {
+    let cfg = config::get_user_config();
+    if !cfg.codex_auto_restore_takeover_on_launch {
+        return Ok(false);
+    }
+    let base_dir = codex_account::get_codex_home();
+    let reapply_catalog_result =
+        codex_account::reapply_experimental_model_policy_if_enabled(&base_dir)?;
+    logger::log_info(&format!(
+        "[Codex Auto-Restore] restore_codex_active_takeover_if_enabled executed: reapply_catalog={}",
+        reapply_catalog_result
+    ));
+    Ok(reapply_catalog_result)
+}
+
 // ─── Codex 账号分组持久化 ────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "codex_quota_future_tests.rs"]
+mod codex_quota_future_tests;

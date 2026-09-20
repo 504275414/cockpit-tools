@@ -339,16 +339,36 @@ fn quit_claude_desktop_for_profile_write() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn quit_claude_desktop_for_profile_write() -> Result<(), String> {
-    let target_dir = get_default_claude_desktop_user_data_dir()?
-        .to_string_lossy()
-        .to_string();
+    let target_dir = get_default_claude_desktop_user_data_dir()?;
+    let target_dir_arg = target_dir.to_string_lossy().to_string();
     logger::log_info("[Claude] closing configured Claude Desktop before profile write");
-    crate::modules::claude_instance::close_claude(&[target_dir], 8)?;
-    if is_claude_desktop_running() {
-        return Err("Claude is still running, cannot safely write login state. Please quit Claude and retry.".to_string());
+    crate::modules::claude_instance::close_claude(&[target_dir_arg], 8)?;
+
+    // 进程名单会过滤 Electron 子进程（持有 Network\Cookies 的正是它们），所以这里不能只信
+    // is_claude_desktop_running()，必须由登录态文件本身确认已经释放。
+    if wait_for_desktop_profile_release(&target_dir, 12, 250) && !is_claude_desktop_running() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return Ok(());
     }
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    Ok(())
+
+    // Store / MSIX 版路径容易漏判，按包路径结束仍占用的 claude.exe 后再复检。
+    logger::log_warn("[Claude] 登录态文件仍被占用，按 Store 包路径结束 Claude Desktop 进程后重试");
+    match crate::modules::claude_instance::force_close_windows_claude_desktop_processes(8) {
+        Ok(count) => logger::log_info(&format!(
+            "[Claude] 已结束 Store 版 Claude Desktop 进程: count={}",
+            count
+        )),
+        Err(error) => logger::log_warn(&format!(
+            "[Claude] 结束 Store 版 Claude Desktop 进程失败: {}",
+            error
+        )),
+    }
+    if wait_for_desktop_profile_release(&target_dir, 16, 250) && !is_claude_desktop_running() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return Ok(());
+    }
+
+    Err("Claude 仍在运行或登录态文件被占用，无法安全写入登录态。请完全退出 Claude Desktop（含托盘与后台进程）后重试。".to_string())
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -1654,6 +1674,105 @@ fn normalize_desktop_usage_percentage(value: f64) -> i32 {
     clamp_percentage(Some(scaled))
 }
 
+/// Claude Web 近期 `/api/organizations/:org/usage` 返回 `limits[]`，
+/// 不再只返回 five_hour / seven_day 这些固定字段。按官方客户端
+/// `plan-usage` 的 schema 将 session、weekly 以及 extra_usage 映射到
+/// 现有账号模型，同时保留原始响应便于后续扩展。
+fn official_usage_limits_to_quota(raw: &Value) -> Option<ClaudeQuota> {
+    let limits = raw.get("limits").and_then(Value::as_array)?;
+    let mut five_hour_percentage = None;
+    let mut five_hour_reset_time = None;
+    let mut seven_day_percentage = None;
+    let mut seven_day_reset_time = None;
+    let mut seven_day_sonnet_percentage = None;
+    let mut seven_day_sonnet_reset_time = None;
+
+    for limit in limits {
+        let Some(object) = limit.as_object() else {
+            continue;
+        };
+        let kind = object
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let group = object
+            .get("group")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let percent = read_f64_value(object.get("percent"));
+        let reset_time = parse_reset_seconds(object.get("resets_at"));
+        let product_name = object
+            .get("scope")
+            .and_then(|scope| scope.as_object())
+            .and_then(|scope| scope.get("model").or_else(|| scope.get("surface")))
+            .and_then(|model| model.get("display_name"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        if kind == "session" || group == "session" {
+            if five_hour_percentage.is_none() {
+                five_hour_percentage = percent.map(normalize_desktop_usage_percentage);
+                five_hour_reset_time = reset_time;
+            }
+        } else if group == "weekly" || kind == "weekly" {
+            if product_name.contains("sonnet") {
+                if seven_day_sonnet_percentage.is_none() {
+                    seven_day_sonnet_percentage = percent.map(normalize_desktop_usage_percentage);
+                    seven_day_sonnet_reset_time = reset_time;
+                }
+            } else if seven_day_percentage.is_none() {
+                seven_day_percentage = percent.map(normalize_desktop_usage_percentage);
+                seven_day_reset_time = reset_time;
+            }
+        }
+    }
+
+    let extra_usage = raw.get("extra_usage");
+    let extra_enabled = read_bool_value(extra_usage.and_then(|value| value.get("is_enabled")))
+        .unwrap_or(extra_usage.is_some());
+    let has_window = five_hour_percentage.is_some()
+        || seven_day_percentage.is_some()
+        || seven_day_sonnet_percentage.is_some();
+    if !has_window && !extra_enabled {
+        return None;
+    }
+
+    Some(ClaudeQuota {
+        five_hour_percentage: five_hour_percentage.unwrap_or(0),
+        five_hour_reset_time,
+        seven_day_percentage: seven_day_percentage.unwrap_or(0),
+        seven_day_reset_time,
+        seven_day_sonnet_percentage,
+        seven_day_sonnet_reset_time,
+        extra_usage_percentage: extra_enabled.then(|| {
+            read_f64_value(extra_usage.and_then(|value| value.get("utilization")))
+                .map(normalize_desktop_usage_percentage)
+                .unwrap_or(0)
+        }),
+        extra_usage_reset_time: parse_reset_seconds(
+            extra_usage.and_then(|value| value.get("resets_at")),
+        ),
+        extra_usage_used_cents: first_i64_path_candidates(
+            Some(raw),
+            &[
+                &["extra_usage", "used_credits"],
+                &["extra_usage", "used_cents"],
+            ],
+        ),
+        extra_usage_limit_cents: first_i64_path_candidates(
+            Some(raw),
+            &[
+                &["extra_usage", "monthly_limit"],
+                &["extra_usage", "limit_cents"],
+            ],
+        ),
+        raw_data: Some(raw.clone()),
+    })
+}
+
 fn quota_matches(left: &ClaudeQuota, right: &ClaudeQuota) -> bool {
     left.five_hour_percentage == right.five_hour_percentage
         && left.five_hour_reset_time == right.five_hour_reset_time
@@ -1818,6 +1937,14 @@ fn slim_web_profile_for_storage(profile: &Value) -> Value {
 }
 
 fn desktop_web_usage_to_quota(profile: &Value) -> Option<ClaudeQuota> {
+    let usage_root = profile
+        .get("endpoints")
+        .and_then(|value| value.get("organizationUsage"))
+        .unwrap_or(profile);
+    if let Some(quota) = official_usage_limits_to_quota(usage_root) {
+        return Some(quota);
+    }
+
     let five_hour = first_f64_path_candidates(
         Some(profile),
         &[
@@ -3493,4 +3620,3 @@ pub async fn refresh_all_quotas() -> Result<Vec<(String, Result<ClaudeAccount, S
     }
     Ok(results)
 }
-

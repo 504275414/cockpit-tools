@@ -118,6 +118,7 @@ interface CodexAccountState {
   // Actions
   fetchAccounts: (options?: FetchCodexAccountsOptions) => Promise<void>;
   fetchCurrentAccount: (options?: FetchCodexCurrentAccountOptions) => Promise<void>;
+  restoreActiveTakeoverIfNeeded: () => Promise<void>;
   applyAccountSnapshot: (account: CodexAccount) => void;
   switchAccount: (accountId: string, options?: SwitchCodexAccountOptions) => Promise<CodexAccount>;
   deleteAccount: (accountId: string) => Promise<void>;
@@ -126,7 +127,7 @@ interface CodexAccountState {
   refreshSubscriptionInfo: (accountId: string) => Promise<CodexAccount>;
   refreshAllQuotas: () => Promise<number>;
   hydrateAccountProfilesIfNeeded: (accountIds?: string[]) => Promise<void>;
-  importFromLocal: () => Promise<CodexAccount>;
+  importFromLocal: (instanceId?: string | null) => Promise<CodexAccount>;
   importFromJson: (jsonContent: string) => Promise<CodexAccount[]>;
   updateAccountName: (accountId: string, name: string) => Promise<CodexAccount>;
   updateApiKeyCredentials: (
@@ -160,6 +161,7 @@ interface CodexAccountState {
     accountId: string,
     accessMode?: string | null,
     startupModel?: string | null,
+    imageGenerationAccountIds?: string[] | null,
   ) => Promise<CodexAccount>;
 }
 
@@ -205,6 +207,14 @@ export const useCodexAccountStore = create<CodexAccountState>((set, get) => ({
         return;
       }
       console.error('获取当前 Codex 账号失败:', e);
+    }
+  },
+
+  restoreActiveTakeoverIfNeeded: async () => {
+    try {
+      await codexService.restoreCodexActiveTakeoverIfEnabled();
+    } catch (e) {
+      console.warn('[Codex Store] 自动恢复接管失败:', e);
     }
   },
 
@@ -442,8 +452,8 @@ export const useCodexAccountStore = create<CodexAccountState>((set, get) => ({
     }
   },
 
-  importFromLocal: async () => {
-    const account = await codexService.importCodexFromLocal();
+  importFromLocal: async (instanceId?: string | null) => {
+    const account = await codexService.importCodexFromLocal(instanceId);
     await get().fetchAccounts();
     await emitAccountsChanged({
       platformId: 'codex',
@@ -542,11 +552,13 @@ export const useCodexAccountStore = create<CodexAccountState>((set, get) => ({
     accountId: string,
     accessMode?: string | null,
     startupModel?: string | null,
+    imageGenerationAccountIds?: string[] | null,
   ) => {
     const account = await codexService.updateCodexAccountInstanceAccess(
       accountId,
       accessMode,
       startupModel,
+      imageGenerationAccountIds,
     );
     await get().fetchAccounts();
     await get().fetchCurrentAccount();

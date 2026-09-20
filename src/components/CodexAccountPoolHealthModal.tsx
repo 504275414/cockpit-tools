@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { CircleAlert, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { CodexAccount } from "../types/codex";
@@ -84,6 +84,16 @@ function issueKindForHealth(
   return null;
 }
 
+function hasQuotaCooldown(
+  health: CodexLocalAccessAccountHealth | null,
+): boolean {
+  return Boolean(
+    health?.cooldowns.some((cooldown) =>
+      cooldown.reason.trim().toLowerCase().includes("quota"),
+    ) || health?.schedulerReason?.trim().toLowerCase().includes("quota"),
+  );
+}
+
 function formatCooldown(
   cooldown: CodexLocalAccessAccountCooldown,
   t: ReturnType<typeof useTranslation>["t"],
@@ -106,6 +116,25 @@ function formatCooldown(
   });
 }
 
+type PoolMemberStatus =
+  CodexLocalAccessAccountPoolHealth["accountStatuses"][number];
+
+function poolMemberIssueKind(member: PoolMemberStatus): HealthIssueKind {
+  if (member.available) return "unavailable";
+  const code = member.reasonCode.trim().toLowerCase();
+  if (code.includes("cooldown")) return "cooldown";
+  if (
+    code.includes("auth") ||
+    code.includes("token") ||
+    code.includes("unauthorized")
+  ) {
+    return "auth";
+  }
+  if (code.includes("quota")) return "quota";
+  if (code === "missing") return "missing";
+  return "unavailable";
+}
+
 export function CodexAccountPoolHealthModal({
   isOpen,
   accountIds,
@@ -124,6 +153,55 @@ export function CodexAccountPoolHealthModal({
     scrollKey: recoveryErrorScrollKey,
     set: setRecoveryError,
   } = useModalErrorState();
+  const [recoveringAccountIds, setRecoveringAccountIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [recoveringAll, setRecoveringAll] = useState(false);
+  const [recoverySuccess, setRecoverySuccess] = useState<string | null>(null);
+  const recoveryInFlightRef = useRef(false);
+  const poolMemberStatuses = useMemo(() => {
+    const healthById = new Map(
+      accountHealth.map((health) => [health.accountId, health]),
+    );
+    const accountById = new Map(accounts.map((account) => [account.id, account]));
+    return accountPoolHealth.map((pool) => {
+      const reported = (pool.accountStatuses ?? []).filter((member) =>
+        member.accountId.trim(),
+      );
+      if (reported.length > 0) {
+        return reported;
+      }
+      // Older sidecars did not send member diagnostics. Keep the account-level
+      // view useful by synthesizing one row per selected account. Do not require
+      // the account list to have finished loading: the account ID is enough to
+      // show the failure and invoke recovery.
+      return accountIds
+        .map((accountId) => {
+          const health = healthById.get(accountId);
+          const model = pool.model.trim().toLowerCase();
+          const cooldown = health?.cooldowns.find(
+            (item) => !model || item.modelId.trim().toLowerCase() === model,
+          );
+          return {
+            accountId,
+            accountEmail: accountById.get(accountId)?.email ?? "",
+            available: false,
+            reasonCode: cooldown?.modelId
+              ? "model_cooldown"
+              : health?.schedulerReason || "pool_unavailable",
+            reasonMessage: cooldown
+              ? formatCooldown(cooldown, t)
+              : t(
+                  "codex.localAccess.accountPoolHealth.dialog.poolUnavailableDetail",
+                  {
+                    model: pool.model.trim() || t("common.unknown", "未知模型"),
+                    defaultValue: "模型 {{model}} 的请求没有选出可用账号",
+                  },
+                ),
+          };
+        });
+    });
+  }, [accountHealth, accountIds, accountPoolHealth, accounts, t]);
   const issues = useMemo<HealthIssue[]>(() => {
     const accountsById = new Map(accounts.map((account) => [account.id, account]));
     const healthById = new Map(
@@ -184,6 +262,12 @@ export function CodexAccountPoolHealthModal({
       );
     }
     if (issue.kind === "cooldown" && issue.health) {
+      if (hasQuotaCooldown(issue.health)) {
+        return t(
+          "codex.localAccess.accountPoolHealth.dialog.quotaDetail",
+          "账号额度暂时不可用，请等待额度恢复或检查套餐状态",
+        );
+      }
       return issue.health.cooldowns
         .map((cooldown) => formatCooldown(cooldown, t))
         .join(" · ");
@@ -229,69 +313,88 @@ export function CodexAccountPoolHealthModal({
     );
   };
 
-  const poolIssueTitle = (health: CodexLocalAccessAccountPoolHealth): string =>
-    health.apiKeyLabel.trim() ||
-    health.apiKeyId.trim() ||
-    t(
-      "codex.localAccess.accountPoolHealth.dialog.unscopedApiKey",
-      "当前 API Key",
-    );
-  const poolIssueDetail = (health: CodexLocalAccessAccountPoolHealth): string => {
-    const model = health.model.trim() || t("common.unknown", "未知");
-    if (!health.diagnosticAvailable) {
-      return t(
-        "codex.localAccess.accountPoolHealth.dialog.poolUnavailableDetail",
-        {
-          model,
-          defaultValue: "模型 {{model}} 的请求没有选出可用账号",
-        },
-      );
-    }
-    return t(
-      "codex.localAccess.accountPoolHealth.dialog.poolDiagnosticDetail",
-      {
-        model,
-        candidate: health.candidateAuths,
-        scoped: health.scopedAuths,
-        available: health.availableAuths,
-        unavailable: health.unavailableAuths,
-        modelExcluded: health.modelExcludedAuths,
-        quotaReserved: health.quotaReservedAuths,
-        imageBlocked: health.imagePolicyBlockedAuths,
-        defaultValue:
-          "模型 {{model}}：候选 {{candidate}}，范围匹配 {{scoped}}，可用 {{available}}，不可用 {{unavailable}}，模型排除 {{modelExcluded}}，额度保留 {{quotaReserved}}，生图策略拦截 {{imageBlocked}}",
-      },
-    );
-  };
-
   const recoverableAccountIds = issues
     .filter(
       (issue) =>
         issue.kind !== "missing" &&
-        issue.kind !== "quota" &&
         issue.health?.schedulerReason !== "disabled",
     )
     .map((issue) => issue.accountId);
   const isRecoverable = (issue: HealthIssue) =>
     recoverableAccountIds.includes(issue.accountId);
-  const poolRecoveryAccountIds = accountIds.filter((accountId) =>
-    accounts.some((account) => account.id === accountId),
+  const poolMemberAccountIds = new Set(
+    poolMemberStatuses.flatMap((members) =>
+      members
+        .map((member) => member.accountId.trim())
+        .filter(Boolean),
+    ),
   );
-  const hasPoolIssues = accountPoolHealth.length > 0;
-  const runRecovery = async (accountIds: string[]) => {
+  const visibleAccountIssues = issues.filter(
+    (issue) => !poolMemberAccountIds.has(issue.accountId),
+  );
+  const isPoolMemberRecoverable = (
+    member: CodexLocalAccessAccountPoolHealth["accountStatuses"][number],
+  ): boolean => {
+    const code = member.reasonCode.trim().toLowerCase();
+    return (
+      Boolean(member.accountId.trim()) &&
+      !member.available &&
+      code !== "disabled" &&
+      code !== "missing" &&
+      code !== "quota_reserved" &&
+      !["model_excluded", "model_disabled", "image_policy_blocked"].includes(
+        code,
+      )
+    );
+  };
+  const poolMemberRecoveryIds = Array.from(
+    new Set(
+      poolMemberStatuses.flatMap((members) =>
+        members
+          .filter(isPoolMemberRecoverable)
+          .map((member) => member.accountId.trim())
+          .filter(Boolean),
+      ),
+    ),
+  );
+  const runRecovery = async (
+    accountIds: string[],
+    source: "single" | "all",
+  ) => {
+    const normalizedAccountIds = Array.from(
+      new Set(accountIds.map((accountId) => accountId.trim()).filter(Boolean)),
+    );
+    if (normalizedAccountIds.length === 0 || recoveryInFlightRef.current) {
+      return;
+    }
+    recoveryInFlightRef.current = true;
     setRecoveryError(null);
+    setRecoverySuccess(null);
+    setRecoveringAccountIds(new Set(normalizedAccountIds));
+    setRecoveringAll(source === "all");
     try {
-      if (accountIds.length === 1) {
-        await onRecover(accountIds[0]);
+      if (normalizedAccountIds.length === 1) {
+        await onRecover(normalizedAccountIds[0]);
       } else {
-        await onRecoverAll(accountIds);
+        await onRecoverAll(normalizedAccountIds);
       }
+      setRecoverySuccess(
+        t("codex.localAccess.accountPoolHealth.recoverSuccess", {
+          count: normalizedAccountIds.length,
+          defaultValue: "已提交 {{count}} 个账号的恢复操作",
+        }),
+      );
     } catch (error) {
       setRecoveryError(String(error).replace(/^Error:\s*/, ""));
+    } finally {
+      recoveryInFlightRef.current = false;
+      setRecoveringAccountIds(new Set());
+      setRecoveringAll(false);
     }
   };
   const handleClose = () => {
     setRecoveryError(null);
+    setRecoverySuccess(null);
     onClose();
   };
 
@@ -310,14 +413,14 @@ export function CodexAccountPoolHealthModal({
               <h3 id="codex-account-pool-health-title">
                 {t(
                   "codex.localAccess.accountPoolHealth.dialog.title",
-                  "异常账号",
+                  "账号状态",
                 )}
               </h3>
             </div>
             <p>
               {t(
                 "codex.localAccess.accountPoolHealth.dialog.description",
-                "以下状态来自 Sidecar 账号调度器。恢复操作会清除调度冷却并重新尝试账号。",
+                "以下状态按账号显示，包含对应模型、不可用原因和可执行的恢复操作。",
               )}
             </p>
           </div>
@@ -336,7 +439,17 @@ export function CodexAccountPoolHealthModal({
             message={recoveryError}
             scrollKey={recoveryErrorScrollKey}
           />
-          {!hasPoolIssues && issues.length === 0 ? (
+          {recoverySuccess && (
+            <div
+              className="codex-account-pool-health-success"
+              role="status"
+              aria-live="polite"
+            >
+              <ShieldCheck size={15} />
+              <span>{recoverySuccess}</span>
+            </div>
+          )}
+          {poolMemberAccountIds.size === 0 && issues.length === 0 ? (
             <div className="codex-account-pool-health-empty">
               <ShieldCheck size={24} />
               <span>
@@ -348,75 +461,89 @@ export function CodexAccountPoolHealthModal({
             </div>
           ) : (
             <div className="codex-account-pool-health-list">
-              {accountPoolHealth.map((health) => (
-                <div
-                  className="codex-account-pool-health-item is-pool"
-                  key={health.apiKeyId || "__unscoped__"}
-                >
-                  <div className="codex-account-pool-health-item-primary">
-                    <div className="codex-account-pool-health-item-identity">
-                      <strong title={poolIssueTitle(health)}>
-                        {poolIssueTitle(health)}
-                      </strong>
-                      <span className="codex-account-pool-health-item-status">
-                        {t(
-                          "codex.localAccess.accountPoolHealth.dialog.poolUnavailable",
-                          "账号池无可用账号",
-                        )}
-                      </span>
-                    </div>
-                  </div>
-                  <p className="codex-account-pool-health-item-detail">
-                    {poolIssueDetail(health)}
-                  </p>
-                  {health.errorMessage.trim() && (
-                    <code className="codex-account-pool-health-pool-error">
-                      {health.errorCode
-                        ? `${health.errorCode}: ${health.errorMessage}`
-                        : health.errorMessage}
-                    </code>
-                  )}
-                  {(health.accountStatuses ?? []).length > 0 && (
-                    <div className="codex-account-pool-health-members">
-                      {(health.accountStatuses ?? []).map((member) => {
-                        const account = accounts.find((item) => item.id === member.accountId);
-                        const rawName = resolveIssueDisplayName(
-                          account,
-                          null,
-                          member.accountEmail || member.accountId,
-                        );
-                        const displayName = maskAccountText
-                          ? maskAccountText(rawName)
-                          : rawName;
-                        return (
-                          <div
-                            className={`codex-account-pool-health-member ${member.available ? "is-available" : "is-unavailable"}`}
-                            key={`${health.apiKeyId}:${member.accountId}`}
+              {accountPoolHealth.flatMap((health, healthIndex) =>
+                (poolMemberStatuses[healthIndex] ?? []).map((member) => {
+                  const account = accounts.find(
+                    (item) => item.id === member.accountId,
+                  );
+                  const rawName = resolveIssueDisplayName(
+                    account,
+                    null,
+                    member.accountEmail || member.accountId,
+                  );
+                  const displayName = maskAccountText
+                    ? maskAccountText(rawName)
+                    : rawName;
+                  const presentation = account
+                    ? buildCodexAccountPresentation(account, t)
+                    : null;
+                  const recoverable = isPoolMemberRecoverable(member);
+                  const recovering = recoveringAccountIds.has(member.accountId);
+                  const memberKind = poolMemberIssueKind(member);
+                  return (
+                    <div
+                      className={`codex-account-pool-health-item is-${member.available ? "available" : memberKind}`}
+                      key={`${healthIndex}:${health.apiKeyId || "__unscoped__"}:${health.model}:${member.accountId}`}
+                    >
+                      <div className="codex-account-pool-health-item-primary">
+                        <div className="codex-account-pool-health-item-identity">
+                          <strong title={displayName}>{displayName}</strong>
+                          {presentation?.planLabel && (
+                            <span
+                              className={`tier-badge ${presentation.planClass || "unknown"}`}
+                            >
+                              {presentation.planLabel}
+                            </span>
+                          )}
+                          {health.model.trim() && (
+                            <span className="codex-account-pool-health-model-pill">
+                              {health.model.trim()}
+                            </span>
+                          )}
+                          <span className="codex-account-pool-health-item-status">
+                            {member.available
+                              ? t("codex.apiService.health.availableAccounts", "可用")
+                              : issueLabel(memberKind)}
+                          </span>
+                          {member.reasonCode.trim() && (
+                            <code>{member.reasonCode}</code>
+                          )}
+                        </div>
+                        {recoverable && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() =>
+                              void runRecovery([member.accountId], "single")
+                            }
+                            disabled={actionBusy || recoveringAccountIds.size > 0}
                           >
-                            <div className="codex-account-pool-health-member-primary">
-                              <strong title={displayName}>{displayName}</strong>
-                              <span className="codex-account-pool-health-item-status">
-                                {member.available
-                                  ? t("codex.apiService.health.availableAccounts", "可用")
-                                  : t("codex.apiService.accountHealth.unavailable", "不可用")}
-                              </span>
-                              {member.reasonCode.trim() && (
-                                <code>{member.reasonCode}</code>
-                              )}
-                            </div>
-                            {member.reasonMessage.trim() && (
-                              <p className="codex-account-pool-health-member-detail">
-                                {member.reasonMessage}
-                              </p>
-                            )}
-                          </div>
-                        );
-                      })}
+                            <RefreshCw
+                              size={13}
+                              className={recovering ? "loading-spinner" : undefined}
+                            />
+                            {recovering
+                              ? t(
+                                  "codex.localAccess.accountPoolHealth.dialog.recovering",
+                                  "恢复中…",
+                                )
+                              : t(
+                                  "codex.localAccess.accountPoolHealth.dialog.recover",
+                                  "恢复",
+                                )}
+                          </button>
+                        )}
+                      </div>
+                      {member.reasonMessage.trim() && (
+                        <p className="codex-account-pool-health-item-detail">
+                          {member.reasonMessage}
+                        </p>
+                      )}
                     </div>
-                  )}
-                </div>
-              ))}
-              {issues.map((issue) => (
+                  );
+                }),
+              )}
+              {visibleAccountIssues.map((issue) => (
                 <div
                   className={`codex-account-pool-health-item is-${issue.kind}`}
                   key={issue.accountId}
@@ -453,14 +580,28 @@ export function CodexAccountPoolHealthModal({
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        onClick={() => void runRecovery([issue.accountId])}
-                        disabled={actionBusy}
+                        onClick={() =>
+                          void runRecovery([issue.accountId], "single")
+                        }
+                        disabled={actionBusy || recoveringAccountIds.size > 0}
                       >
-                        <RefreshCw size={14} />
-                        {t(
-                          "codex.localAccess.accountPoolHealth.dialog.recover",
-                          "恢复",
-                        )}
+                        <RefreshCw
+                          size={14}
+                          className={
+                            recoveringAccountIds.has(issue.accountId)
+                              ? "loading-spinner"
+                              : undefined
+                          }
+                        />
+                        {recoveringAccountIds.has(issue.accountId)
+                          ? t(
+                              "codex.localAccess.accountPoolHealth.dialog.recovering",
+                              "恢复中…",
+                            )
+                          : t(
+                              "codex.localAccess.accountPoolHealth.dialog.recover",
+                              "恢复",
+                            )}
                       </button>
                     )}
                   </div>
@@ -482,32 +623,33 @@ export function CodexAccountPoolHealthModal({
             {t("common.close", "关闭")}
           </button>
           {(recoverableAccountIds.length > 0 ||
-            (hasPoolIssues && poolRecoveryAccountIds.length > 0)) && (
+            poolMemberRecoveryIds.length > 0) && (
             <button
               type="button"
               className="btn btn-primary"
               onClick={() =>
                 void runRecovery(
-                  hasPoolIssues ? poolRecoveryAccountIds : recoverableAccountIds,
+                  Array.from(
+                    new Set([...recoverableAccountIds, ...poolMemberRecoveryIds]),
+                  ),
+                  "all",
                 )
               }
-              disabled={actionBusy}
+              disabled={actionBusy || recoveringAccountIds.size > 0}
             >
-              <RefreshCw size={15} />
-              {actionBusy
+              <RefreshCw
+                size={15}
+                className={recoveringAll ? "loading-spinner" : undefined}
+              />
+              {recoveringAll
                 ? t(
                     "codex.localAccess.accountPoolHealth.dialog.recovering",
                     "恢复中…",
                   )
-                : hasPoolIssues
-                  ? t(
-                      "codex.localAccess.accountPoolHealth.dialog.resyncPool",
-                      "重新同步账号池",
-                    )
-                  : t(
-                      "codex.localAccess.accountPoolHealth.dialog.recoverAll",
-                      "全部恢复",
-                    )}
+                : t(
+                    "codex.localAccess.accountPoolHealth.dialog.recoverAll",
+                    "全部恢复",
+                  )}
             </button>
           )}
         </div>

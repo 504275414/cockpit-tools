@@ -1,9 +1,10 @@
 import { useEffect, type ReactElement } from "react";
-import { RefreshCw, Upload, Trash2, X, Power, Database, Copy, Check, Play, RotateCw, CircleAlert, Info, Calendar, Tag, Eye, EyeOff, FileText, ExternalLink, Pencil, FolderOpen, FolderPlus, ChevronRight, LogOut, Wrench, Terminal, Link2 } from "lucide-react";
+import { RefreshCw, Upload, Trash2, X, Power, Database, Copy, Check, Play, RotateCw, CircleAlert, Info, Calendar, Tag, Eye, EyeOff, FileText, ExternalLink, Pencil, FolderOpen, FolderPlus, ChevronRight, LogOut, Wrench, Terminal, Link2, Waypoints } from "lucide-react";
 import { isCodexGroupQuotaRefreshInherit, resolveCodexGroupQuotaAutoRefreshMinutes } from "../services/codexAccountGroupService";
 import { isCodexApiKeyAccount, isCodexAgentIdentityAccount, isCodexChatCompletionsApiKeyAccount, isCodexNewApiAccount } from "../types/codex";
 import { isVerboseCodexQuotaErrorMessage, summarizeCodexQuotaErrorMessage } from "../utils/codexQuotaError";
 import { CodexQuotaMiniRows } from "../components/codex/CodexQuotaMiniRows";
+import { CodexTeamQuotaHistory } from "../components/codex/CodexTeamQuotaHistory";
 import { isCodexClientReauthNoticeOnly, isCodexRefreshTokenNoticeOnly, isCodexRefreshTokenReusedAccount, isCodexServerRevokedReauth } from "../utils/codexSwitchAuthFailure";
 import { DEFAULT_CODEX_INSTANCE_ID } from "../components/codex/CodexLaunchPreviewModal";
 import { isDeepSeekAccount, isCodexTokenPlanAccount, shouldShowCodexApiKeyUsagePanel } from "../utils/codexDeepSeekAccess";
@@ -86,6 +87,8 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
   | "localAccessCopiedField"
   | "localAccessDetailsExpanded"
   | "localAccessEntryVisible"
+  | "instanceGatewaySummary"
+  | "instanceGatewaysLoading"
   | "localAccessKeyVisible"
   | "localAccessLaunchCurrent"
   | "localAccessPortKilling"
@@ -104,6 +107,7 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
   | "openLocalAccessMemberPicker"
   | "openLocalAccessOAuthBindingModal"
   | "openLocalAccessPanel"
+  | "openInstanceGateways"
   | "openQuickSwitchProviderModal"
   | "openQuotaErrorDetail"
   | "openTagModal"
@@ -229,6 +233,8 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
     localAccessCopiedField,
     localAccessDetailsExpanded,
     localAccessEntryVisible,
+    instanceGatewaySummary,
+    instanceGatewaysLoading,
     localAccessKeyVisible,
     localAccessLaunchCurrent,
     localAccessPortKilling,
@@ -247,6 +253,7 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
     openLocalAccessMemberPicker,
     openLocalAccessOAuthBindingModal,
     openLocalAccessPanel,
+    openInstanceGateways,
     openQuickSwitchProviderModal,
     openQuotaErrorDetail,
     openTagModal,
@@ -487,7 +494,7 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                 </>
               ) : (
                 !isChatCompletionsApiKey && (
-                  <CodexQuotaMiniRows items={compactOfficialQuotaItems} t={t} />
+                  <>{account.plan_type !== 'self_serve_business_usage_based' && <CodexQuotaMiniRows items={compactOfficialQuotaItems} t={t} />}<CodexTeamQuotaHistory account={account} /></>
                 )
               )}
               {showCompactExpiry && (
@@ -999,7 +1006,8 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                         <strong>{cockpitApiAccountBalanceText}</strong>
                       </div>
                     )}
-                    <CodexQuotaMiniRows items={quotaItems} t={t} />
+                    {account.plan_type !== 'self_serve_business_usage_based' && <CodexQuotaMiniRows items={quotaItems} t={t} />}
+                    <CodexTeamQuotaHistory account={account} />
                     {quotaItems.length === 0 && !cockpitApiAccountBalanceText && (
                       <div className="quota-empty">
                         {t("common.shared.quota.noData", "暂无配额数据")}
@@ -1321,6 +1329,37 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
               </div>
             )}
             <div className="codex-local-access-header-actions">
+              <button
+                type="button"
+                className={`codex-local-access-instance-gateways${
+                  instanceGatewaySummary.issues > 0 ? " has-issue" : ""
+                }${instanceGatewaySummary.total === 0 ? " is-empty" : ""}`}
+                onClick={openInstanceGateways}
+                title={t("codex.instanceGateways.title", "实例网关")}
+                aria-label={t("codex.instanceGateways.title", "实例网关")}
+              >
+                {instanceGatewaysLoading ? (
+                  <RefreshCw size={12} className="loading-spinner" />
+                ) : (
+                  <Waypoints size={13} />
+                )}
+                <span>
+                  {instanceGatewaySummary.total > 0
+                    ? t("codex.instanceGateways.entryCount", {
+                        count: instanceGatewaySummary.total,
+                        defaultValue: "实例网关 {{count}}",
+                      })
+                    : t("codex.instanceGateways.entry", "实例网关")}
+                </span>
+                {instanceGatewaySummary.issues > 0 && (
+                  <span className="codex-local-access-instance-gateways-issue">
+                    {t("codex.instanceGateways.issueCount", {
+                      count: instanceGatewaySummary.issues,
+                      defaultValue: "{{count}} 异常",
+                    })}
+                  </span>
+                )}
+              </button>
               {isLocalAccessCurrent && (
                 <span className="current-tag">{t("codex.current", "当前")}</span>
               )}
@@ -1577,8 +1616,6 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                     authError: localAccessAccountPoolHealthSummary.authError,
                     quotaLimited:
                       localAccessAccountPoolHealthSummary.quotaLimited,
-                    poolUnavailable:
-                      localAccessAccountPoolHealthSummary.poolUnavailable,
                     defaultValue:
                       "可用 {{available}}/{{total}}，异常 {{abnormal}}，冷却 {{cooldown}}，缺失 {{missing}}，鉴权 {{authError}}，额度 {{quotaLimited}}",
                   })}
@@ -1589,14 +1626,13 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                   )}
                 >
                   <span className="codex-local-access-health-summary-title">
-                    {t("codex.localAccess.accountPoolHealth.title", "账号池")}
+                    {t("codex.localAccess.accountPoolHealth.title", "账号状态")}
                   </span>
                   <span className="codex-local-access-health-summary-value">
                     {localAccessAccountPoolHealthSummary.available ===
-                      localAccessAccountPoolHealthSummary.total &&
+                    localAccessAccountPoolHealthSummary.total &&
                     localAccessAccountPoolHealthSummary.abnormal === 0 &&
-                    localAccessAccountPoolHealthSummary.cooldown === 0 &&
-                    localAccessAccountPoolHealthSummary.poolUnavailable === 0
+                    localAccessAccountPoolHealthSummary.cooldown === 0
                       ? t("codex.localAccess.accountPoolHealth.allAvailable", {
                           count: localAccessAccountPoolHealthSummary.total,
                           defaultValue: "全部可用 {{count}}",
@@ -1609,16 +1645,12 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                         })}
                   </span>
                   {(localAccessAccountPoolHealthSummary.abnormal > 0 ||
-                    localAccessAccountPoolHealthSummary.cooldown > 0 ||
-                    localAccessAccountPoolHealthSummary.poolUnavailable > 0) && (
+                    localAccessAccountPoolHealthSummary.cooldown > 0) && (
                     <span className="codex-local-access-health-summary-value">
                       {t("codex.localAccess.accountPoolHealth.issueSummary", {
                         abnormal: localAccessAccountPoolHealthSummary.abnormal,
                         cooldown: localAccessAccountPoolHealthSummary.cooldown,
-                        poolUnavailable:
-                          localAccessAccountPoolHealthSummary.poolUnavailable,
-                        defaultValue:
-                          "异常 {{abnormal}} · 池异常 {{poolUnavailable}} · 冷却 {{cooldown}}",
+                        defaultValue: "异常 {{abnormal}} · 冷却 {{cooldown}}",
                       })}
                     </span>
                   )}
@@ -2386,7 +2418,8 @@ export function useCodexAccountsRenderers(context: Pick<ReturnType<typeof useCod
                         <strong>{cockpitApiAccountBalanceText}</strong>
                       </div>
                     )}
-                    <CodexQuotaMiniRows items={quotaItems} t={t} />
+                    {account.plan_type !== 'self_serve_business_usage_based' && <CodexQuotaMiniRows items={quotaItems} t={t} />}
+                    <CodexTeamQuotaHistory account={account} />
                     {quotaItems.length === 0 && !cockpitApiAccountBalanceText && (
                       <span style={{ color: "var(--text-muted)", fontSize: 13 }}>
                         {t("common.shared.quota.noData", "暂无配额数据")}

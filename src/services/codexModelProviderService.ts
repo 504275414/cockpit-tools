@@ -9,12 +9,14 @@ import {
   DEEPSEEK_API_BASE_URL,
   DEEPSEEK_API_PROVIDER_ID,
   DEEPSEEK_CODEX_MODEL_CATALOG,
+  DEEPSEEK_CODEX_VISION_MODEL_CATALOG,
   findCodexApiProviderPresetById,
   resolveCodexApiProviderPresetId,
 } from '../utils/codexProviderPresets';
 import {
   APIKEY_FUN_DEFAULT_MODEL_CATALOG,
   isApiKeyFunProviderBaseUrl,
+  normalizeApiKeyFunProviderBaseUrl,
 } from '../utils/apikeyFunLinks';
 import {
   queryModelProviderUsage,
@@ -187,11 +189,20 @@ function normalizeIntegrationType(value: unknown): 'sub2api' | 'new_api' | undef
   return value === 'sub2api' || value === 'new_api' ? value : undefined;
 }
 
-function migrateApiKeyFunProviderWireApi(
+function migrateApiKeyFunProvider(
   providers: CodexModelProvider[],
 ): { providers: CodexModelProvider[]; changed: boolean } {
   let changed = false;
   const next = providers.map((provider) => {
+    const baseUrl = normalizeApiKeyFunProviderBaseUrl(provider.baseUrl);
+    if (baseUrl !== provider.baseUrl) {
+      changed = true;
+      provider = {
+        ...provider,
+        baseUrl,
+        updatedAt: Date.now(),
+      };
+    }
     if (
       isApiKeyFunProviderBaseUrl(provider.baseUrl) &&
       provider.wireApi === 'chat_completions'
@@ -239,22 +250,31 @@ function enforceDeepSeekProvider(provider: CodexModelProvider): boolean {
       provider.supportsWebsockets = false;
       changed = true;
     }
+    // DeepSeek Responses 的识图按模型声明，走 per-model 能力位。供应商级默认保持关闭，
+    // 官方模型只补默认值，用户在模型列表里的开关（含手动关闭）原样保留。
     if (provider.supportsVision === true) {
       provider.supportsVision = false;
+      changed = true;
+    }
+    const capabilities = provider.modelCapabilities ?? {};
+    const nextCapabilities = { ...capabilities };
+    for (const visionModel of DEEPSEEK_CODEX_VISION_MODEL_CATALOG) {
+      if (!Object.keys(nextCapabilities).some(
+        (model) => model.trim().toLowerCase() === visionModel.toLowerCase(),
+      )) {
+        nextCapabilities[visionModel] = { supportsVision: true };
+      }
+    }
+    if (JSON.stringify(provider.modelCapabilities ?? {}) !== JSON.stringify(nextCapabilities)) {
+      provider.modelCapabilities = nextCapabilities;
       changed = true;
     }
     if (provider.visionRoutingModel !== undefined) {
       provider.visionRoutingModel = undefined;
       changed = true;
     }
-    if (provider.modelCapabilities !== undefined) {
-      provider.modelCapabilities = undefined;
-      changed = true;
-    }
-    if (
-      provider.modelCatalog?.length !== modelCatalog.length ||
-      modelCatalog.some((model, index) => provider.modelCatalog?.[index] !== model)
-    ) {
+    // 模型列表以用户维护的为准，仅在为空时补官方默认。
+    if (!provider.modelCatalog?.length) {
       provider.modelCatalog = modelCatalog;
       changed = true;
     }
@@ -470,7 +490,7 @@ async function ensureProvidersLoaded(): Promise<CodexModelProvider[]> {
     }
     return true;
   });
-  const migration = migrateApiKeyFunProviderWireApi(loaded);
+  const migration = migrateApiKeyFunProvider(loaded);
   loaded = migration.providers;
   let migratedDeepSeek = false;
   for (const provider of loaded) {
@@ -497,6 +517,46 @@ async function writeProviders(providers: CodexModelProvider[]): Promise<void> {
 
 export async function listCodexModelProviders(): Promise<CodexModelProvider[]> {
   return ensureProvidersLoaded();
+}
+
+/** Merge API Key accounts into the provider key list without changing provider metadata. */
+export async function mergeCodexModelProviderApiKeysFromAccounts(
+  accounts: CodexAccount[],
+): Promise<CodexModelProvider[]> {
+  const providers = await ensureProvidersLoaded();
+  let changed = false;
+  const now = Date.now();
+
+  for (const provider of providers) {
+    const providerBaseUrl = normalizeCodexModelProviderBaseUrl(provider.baseUrl);
+    const linkedAccounts = accounts.filter((account) => {
+      if ((account.auth_mode ?? '').toLowerCase() !== 'apikey') return false;
+      const accountBaseUrl = normalizeCodexModelProviderBaseUrl(account.api_base_url ?? '');
+      return (
+        (account.api_provider_id?.trim() === provider.id && provider.id.length > 0) ||
+        (providerBaseUrl !== null && accountBaseUrl === providerBaseUrl)
+      );
+    });
+
+    for (const account of linkedAccounts) {
+      const apiKey = sanitizeApiKey(account.openai_api_key ?? '');
+      if (!apiKey || provider.apiKeys.some((item) => sanitizeApiKey(item.apiKey) === apiKey)) {
+        continue;
+      }
+      provider.apiKeys.push({
+        id: createApiKeyId(),
+        name: sanitizeName(account.account_name ?? ''),
+        apiKey,
+        createdAt: now,
+        updatedAt: now,
+      });
+      provider.updatedAt = now;
+      changed = true;
+    }
+  }
+
+  if (changed) await writeProviders(providers);
+  return cloneProviders(providers);
 }
 
 export function invalidateCodexModelProviderCache(): void {

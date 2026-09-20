@@ -32,6 +32,81 @@ type responsesTerminalEventTestError struct {
 	event []byte
 }
 
+func TestUsageServiceTierPrefersUpstreamResponseTier(t *testing.T) {
+	// 上游实际返回的档位最权威：请求要求 priority 但上游降级为 default 时，
+	// 统计与日志必须显示标准模式。
+	if got := usageServiceTier(coreusage.Record{
+		ResponseServiceTier: "default",
+		ServiceTier:         "priority",
+	}, ""); got != "standard" {
+		t.Fatalf("downgraded response tier = %q, want standard", got)
+	}
+	if got := usageServiceTier(coreusage.Record{
+		ResponseServiceTier: "priority",
+	}, ""); got != "priority" {
+		t.Fatalf("upstream priority tier = %q, want priority", got)
+	}
+}
+
+func TestUsageServiceTierFallsBackToInjectedDefault(t *testing.T) {
+	// 客户端没有指定 service_tier 时，Cockpit 注入的默认档位就是实际使用的档位。
+	for _, record := range []coreusage.Record{
+		{},
+		{ServiceTier: "auto"},
+		{ServiceTier: "default"},
+		{RequestServiceTier: "auto"},
+	} {
+		if got := usageServiceTier(record, "priority"); got != "priority" {
+			t.Fatalf("record %#v fallback tier = %q, want priority", record, got)
+		}
+	}
+	if got := usageServiceTier(coreusage.Record{}, ""); got != "" {
+		t.Fatalf("no tier information = %q, want empty", got)
+	}
+}
+
+func TestUsageServiceTierUsesClientRequestedTier(t *testing.T) {
+	if got := usageServiceTier(coreusage.Record{ServiceTier: "priority"}, ""); got != "priority" {
+		t.Fatalf("client priority tier = %q, want priority", got)
+	}
+	// 客户端显式要求标准档位时不能回退成注入的默认档位。
+	if got := usageServiceTier(coreusage.Record{ServiceTier: "standard"}, "priority"); got != "standard" {
+		t.Fatalf("client standard tier = %q, want standard", got)
+	}
+	if got := usageServiceTier(coreusage.Record{ServiceTier: "flex"}, ""); got != "flex" {
+		t.Fatalf("client flex tier = %q, want flex", got)
+	}
+	if got := usageServiceTier(coreusage.Record{RequestServiceTier: "priority"}, ""); got != "priority" {
+		t.Fatalf("deprecated request tier = %q, want priority", got)
+	}
+	// 官方“超高速”档位必须原样保留，不能落回标准档。
+	if got := usageServiceTier(coreusage.Record{ServiceTier: "ultrafast"}, ""); got != "ultrafast" {
+		t.Fatalf("client ultrafast tier = %q, want ultrafast", got)
+	}
+}
+
+func TestDefaultUsageServiceTierFromConfig(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Default: []config.PayloadRule{{Params: map[string]any{"service_tier": "priority"}}},
+		},
+	}
+	if got := defaultUsageServiceTier(cfg); got != "priority" {
+		t.Fatalf("default config service tier = %q, want priority", got)
+	}
+	if got := defaultUsageServiceTier(nil); got != "" {
+		t.Fatalf("nil config service tier = %q, want empty", got)
+	}
+	standard := &config.Config{
+		Payload: config.PayloadConfig{
+			Default: []config.PayloadRule{{Params: map[string]any{"service_tier": "standard"}}},
+		},
+	}
+	if got := defaultUsageServiceTier(standard); got != "standard" {
+		t.Fatalf("standard config service tier = %q, want standard", got)
+	}
+}
+
 func TestImageGenerationAllowedForAccountPolicy(t *testing.T) {
 	apiKey := &accountSpec{AuthKind: "api_key", ImageGenerationPolicy: "inherit"}
 	if imageGenerationAllowedForAccount(apiKey) {
@@ -209,7 +284,7 @@ func TestSplitResponsesConcatenatedJSONDocumentsRejectsMalformedPayload(t *testi
 }
 
 func TestCodexClientModelsResponseShape(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{"gpt-5.4", "gpt-image-2", codexAutoReviewModel}, &apiKeySpec{}, nil)
+	response := buildCodexClientModelsResponse([]string{"gpt-5.4", "gpt-image-2", codexAutoReviewModel}, &apiKeySpec{}, nil, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -255,7 +330,7 @@ func TestCodexClientModelsResponseShape(t *testing.T) {
 }
 
 func TestCodexClientModelsResponsePreserves56Template(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "custom-compat-model"}, &apiKeySpec{}, nil)
+	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "custom-compat-model"}, &apiKeySpec{}, nil, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -267,8 +342,18 @@ func TestCodexClientModelsResponsePreserves56Template(t *testing.T) {
 	if intFromAny(sol["context_window"]) != 272000 || intFromAny(sol["max_context_window"]) != 921000 {
 		t.Fatalf("sol context windows = %#v / %#v", sol["context_window"], sol["max_context_window"])
 	}
-	if tiers, ok := sol["service_tiers"].([]any); !ok || len(tiers) != 1 {
+	// 官方为 gpt-5.6-sol 同时声明 Fast 与 Ultrafast 两个档位。
+	tiers, ok := sol["service_tiers"].([]any)
+	if !ok || len(tiers) != 2 {
 		t.Fatalf("sol service_tiers = %#v", sol["service_tiers"])
+	}
+	tierIDs := make([]string, 0, len(tiers))
+	for _, raw := range tiers {
+		tier, _ := raw.(map[string]any)
+		tierIDs = append(tierIDs, strings.TrimSpace(fmt.Sprint(tier["id"])))
+	}
+	if got := strings.Join(tierIDs, ","); got != "priority,ultrafast" {
+		t.Fatalf("sol service tier ids = %q, want priority,ultrafast", got)
 	}
 	if got, ok := sol["supports_search_tool"].(bool); !ok || !got {
 		t.Fatalf("sol supports_search_tool = %#v, want true", sol["supports_search_tool"])
@@ -303,6 +388,45 @@ func TestCodexClientModelsResponsePreserves56Template(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponsePreservesAstraTemplate(t *testing.T) {
+	response := buildCodexClientModelsResponse([]string{"gpt-6-astra"}, &apiKeySpec{}, nil, nil)
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("Astra models response = %#v, want one model", response["models"])
+	}
+	astra := models[0]
+	// 与官方客户端一致：展示名统一为 `GPT-6 Astra`。
+	if got := stringFromAny(astra["display_name"]); got != "GPT-6 Astra" {
+		t.Fatalf("Astra display_name = %q", got)
+	}
+	if got := intFromAny(astra["context_window"]); got != 1050000 {
+		t.Fatalf("Astra context_window = %d, want 1050000", got)
+	}
+	if got := intFromAny(astra["max_context_window"]); got != 1050000 {
+		t.Fatalf("Astra max_context_window = %d, want 1050000", got)
+	}
+	levels, ok := astra["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("Astra reasoning levels = %#v", astra["supported_reasoning_levels"])
+	}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "ultra"} {
+		found := false
+		for _, raw := range levels {
+			level, _ := raw.(map[string]any)
+			if stringFromAny(level["effort"]) == effort {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Astra reasoning levels missing %q: %#v", effort, levels)
+		}
+	}
+	if got := stringFromAny(astra["tool_mode"]); got != "code_mode_only" {
+		t.Fatalf("Astra tool_mode = %q", got)
+	}
+}
+
 func TestCodexClientModelsResponseAppliesExplicitContextWindows(t *testing.T) {
 	response := buildCodexClientModelsResponse(
 		[]string{"gpt-5.4", "gpt-5.6-sol", "custom-flash"},
@@ -311,6 +435,7 @@ func TestCodexClientModelsResponseAppliesExplicitContextWindows(t *testing.T) {
 			"gpt-5.6-sol":  900000,
 			"custom-flash": 1048576,
 		},
+		nil,
 	)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
@@ -374,7 +499,7 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 		{name: "provider gateway", spec: &apiKeySpec{ProviderGateway: &providerGatewaySpec{}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "custom-compat-model"}, test.spec, nil)
+			response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol", "custom-compat-model"}, test.spec, nil, nil)
 			models, ok := response["models"].([]map[string]any)
 			if !ok {
 				t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -405,7 +530,7 @@ func TestCodexClientModelsResponseDoesNotInjectFastMode(t *testing.T) {
 func TestCodexClientModelsResponseEnablesWebsocketsWhenConfigured(t *testing.T) {
 	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol"}, &apiKeySpec{
 		ResponsesWebsockets: true,
-	}, nil)
+	}, nil, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -482,17 +607,19 @@ func TestBuildCockpitQuotaResponseGroupsPlansAndPoolHealth(t *testing.T) {
 	weeklyMinutes := int64(10080)
 	state := quotaPoolStateFile{Accounts: map[string]quotaPoolAccountState{
 		"plus-1": {
+			PlanType:  "plus",
 			Primary:   &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(80), WindowMinutes: &fiveHourMinutes},
 			Secondary: &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(40), WindowMinutes: &weeklyMinutes},
 		},
 		"team-1": {
-			Primary: &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(75), WindowMinutes: &weeklyMinutes},
+			PlanType: "team",
+			Primary:  &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(75), WindowMinutes: &weeklyMinutes},
 		},
 	}}
 	accounts := map[string]*accountSpec{
-		"plus-1":    {ID: "plus-1", PlanType: "plus"},
+		"plus-1":    {ID: "plus-1"},
 		"plus-2":    {ID: "plus-2", PlanType: "plus"},
-		"team-1":    {ID: "team-1", PlanType: "team"},
+		"team-1":    {ID: "team-1"},
 		"api-key-1": {ID: "api-key-1", AuthKind: "api_key", PlanType: "custom"},
 	}
 	response := buildCockpitQuotaResponseWithAccounts(
@@ -524,6 +651,26 @@ func TestBuildCockpitQuotaResponseGroupsPlansAndPoolHealth(t *testing.T) {
 	}}, time.Now())
 	if response.AvailableAccountCount != 1 || response.AbnormalAccountCount != 1 || response.CooldownAccountCount != 1 {
 		t.Fatalf("runtime pool health = available %d, abnormal %d, cooldown %d", response.AvailableAccountCount, response.AbnormalAccountCount, response.CooldownAccountCount)
+	}
+}
+
+func TestBuildCockpitQuotaResponseBlocksHourlyWhenWeeklyIsExhausted(t *testing.T) {
+	present := true
+	fiveHourMinutes := int64(300)
+	weeklyMinutes := int64(10080)
+	state := quotaPoolStateFile{Accounts: map[string]quotaPoolAccountState{
+		"account-1": {
+			Primary:   &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(100), WindowMinutes: &fiveHourMinutes},
+			Secondary: &quotaPoolWindowState{Present: &present, RemainingPercent: intPtrForTest(0), WindowMinutes: &weeklyMinutes},
+		},
+	}}
+
+	response := buildCockpitQuotaResponse(&apiKeySpec{AccountIDs: []string{"account-1"}}, state, time.Now())
+	if response.FiveHourRemainingPercent == nil || *response.FiveHourRemainingPercent != 0 {
+		t.Fatalf("five-hour percent = %#v, want 0 when weekly is exhausted", response.FiveHourRemainingPercent)
+	}
+	if response.WeeklyRemainingPercent == nil || *response.WeeklyRemainingPercent != 0 {
+		t.Fatalf("weekly percent = %#v, want 0", response.WeeklyRemainingPercent)
 	}
 }
 
@@ -641,7 +788,7 @@ func TestRelayServerCockpitQuotaUpstreamFailureReturnsScopedEmptyState(t *testin
 func TestCodexClientModelsResponseDisablesSearchForProviderGateway(t *testing.T) {
 	response := buildCodexClientModelsResponse([]string{"gpt-5.6-sol"}, &apiKeySpec{
 		ProviderGateway: &providerGatewaySpec{},
-	}, nil)
+	}, nil, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -681,6 +828,17 @@ func TestCodexClientModelsResponseGatesProviderGatewayImageInput(t *testing.T) {
 			supportsImage: true,
 		},
 		{
+			name: "deepseek vision model supports vision",
+			gateway: &providerGatewaySpec{
+				UpstreamModels: []string{"deepseek-v4-flash-vision-exp"},
+				ModelCapabilities: map[string]providerGatewayModelCapability{
+					"deepseek-v4-flash-vision-exp": {SupportsVision: true},
+				},
+			},
+			model:         "deepseek-v4-flash-vision-exp",
+			supportsImage: true,
+		},
+		{
 			name: "routes images to vision model",
 			gateway: &providerGatewaySpec{
 				UpstreamModels:     []string{"deepseek-v4-pro", "qwen-vl-plus"},
@@ -698,7 +856,7 @@ func TestCodexClientModelsResponseGatesProviderGatewayImageInput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			response := buildCodexClientModelsResponse([]string{test.model}, &apiKeySpec{
 				ProviderGateway: test.gateway,
-			}, nil)
+			}, nil, nil)
 			models, ok := response["models"].([]map[string]any)
 			if !ok {
 				t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -764,7 +922,7 @@ func stringFromAny(value any) string {
 }
 
 func TestCodexSparkUsesCompleteCodexClientCatalogTemplate(t *testing.T) {
-	response := buildCodexClientModelsResponse([]string{codexSparkCatalogTemplateModel, codexSparkModel}, &apiKeySpec{}, nil)
+	response := buildCodexClientModelsResponse([]string{codexSparkCatalogTemplateModel, codexSparkModel}, &apiKeySpec{}, nil, nil)
 	models, ok := response["models"].([]map[string]any)
 	if !ok {
 		t.Fatalf("models response should contain a models array: %#v", response["models"])
@@ -805,8 +963,137 @@ func TestVisibleModelsForAPIKeyUsesPrefixAndFilters(t *testing.T) {
 
 	models := visibleModelsForAPIKey(m, spec)
 
-	if len(models) != 1 || models[0] != "team/gpt-5.4" {
+	if len(models) != 2 || models[0] != "team/gpt-5.4" || models[1] != "team/gpt-reserve" {
 		t.Fatalf("unexpected visible models: %#v", models)
+	}
+}
+
+func TestCodexReserveListingIsIndependentOfScopedAccountEligibility(t *testing.T) {
+	m := &manifest{
+		Accounts: []accountSpec{
+			{ID: "reserve-account", GPTReserveAllowed: true},
+			{ID: "ordinary-account", GPTReserveAllowed: false},
+		},
+		ModelIDs: []string{codexReserveModel, "gpt-5.4"},
+	}
+	reserveSpec := &apiKeySpec{AccountIDs: []string{"reserve-account"}}
+	ordinarySpec := &apiKeySpec{AccountIDs: []string{"ordinary-account"}}
+
+	if got := visibleModelsForAPIKey(m, reserveSpec); len(got) != 2 || got[0] != codexReserveModel {
+		t.Fatalf("entitled API key models = %#v, want reserve first", got)
+	}
+	if got := visibleModelsForAPIKey(m, ordinarySpec); len(got) != 2 || got[0] != codexReserveModel {
+		t.Fatalf("ordinary API key must still list Reserve: %#v", got)
+	}
+	if !validateClientModelVisible(m, reserveSpec, codexReserveModel, codexReserveModel) {
+		t.Fatal("entitled API key should accept gpt-reserve")
+	}
+	if !validateClientModelVisible(m, ordinarySpec, codexReserveModel, codexReserveModel) {
+		t.Fatal("model admission must not hide Reserve; account selection enforces eligibility")
+	}
+}
+
+func TestCodexReserveClientCatalogListsLunaReserveWithLunaCapabilities(t *testing.T) {
+	m := &manifest{
+		Accounts: []accountSpec{{ID: "reserve-account", GPTReserveAllowed: true}},
+		ModelIDs: []string{codexReserveModel},
+	}
+	models := clientCatalogModelsForAPIKey(m, &apiKeySpec{AccountIDs: []string{"reserve-account"}})
+	response := buildCodexClientModelsResponse(models, &apiKeySpec{}, nil, nil)
+	data, ok := response["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models response should contain a models array: %#v", response["models"])
+	}
+	reserve := findCodexClientModelForTest(data, codexReserveModel)
+	if reserve == nil || reserve["display_name"] != "GPT-5.6 Reserve" || reserve["visibility"] != "list" {
+		t.Fatalf("gpt-reserve catalog entry = %#v", reserve)
+	}
+	lunaResponse := buildCodexClientModelsResponse([]string{"gpt-5.6-luna"}, &apiKeySpec{}, nil, nil)
+	luna := findCodexClientModelForTest(lunaResponse["models"].([]map[string]any), "gpt-5.6-luna")
+	for _, field := range []string{"context_window", "max_context_window", "auto_compact_token_limit", "supported_reasoning_levels", "default_reasoning_level", "input_modalities", "tool_mode", "shell_type", "use_responses_lite", "priority"} {
+		if !reflect.DeepEqual(reserve[field], luna[field]) {
+			t.Fatalf("Reserve %s = %#v, want Luna value %#v", field, reserve[field], luna[field])
+		}
+	}
+	if reserve["auto_compact_token_limit"] != nil {
+		t.Fatal("Reserve must not force a compaction threshold")
+	}
+	info := manifestRegistryModelInfo(codexReserveModel, "", 0)
+	if !reflect.DeepEqual(info.Thinking, codexClientThinkingSupport("gpt-5.6-luna")) || info.Thinking == nil {
+		t.Fatalf("Reserve request reasoning capabilities = %#v", info.Thinking)
+	}
+}
+
+func TestImageRequestModelIsNotRewrittenToProviderUpstreamModel(t *testing.T) {
+	// gpt-5.5 是 DeepSeek 网关的目录壳位，必须由别名声明；未声明的 Codex/GPT 官方 id
+	// 不再兜底改写成 provider 上游模型。
+	m := &manifest{
+		ModelIDs:     []string{"gpt-5.5", "deepseek-flash"},
+		ModelAliases: []modelAliasSpec{{SourceModel: "deepseek-flash", Alias: "gpt-5.5"}},
+		aliasToSource: map[string]string{
+			"gpt-5.5": "deepseek-flash",
+		},
+	}
+	spec := &apiKeySpec{
+		ProviderGateway: &providerGatewaySpec{
+			UpstreamModel:  "deepseek-flash",
+			UpstreamModels: []string{"deepseek-flash", "deepseek-v4-pro"},
+		},
+		ImageGenerationAccountIDs: []string{"oauth-1"},
+	}
+
+	rewritten, model, err := rewriteBodyModel(m, spec, "text", []byte(`{"model":"gpt-5.5","input":"hi"}`))
+	if err != nil || model != "gpt-5.5" || rewritten == nil {
+		t.Fatalf("chat request should still be rewritten: model=%q rewritten=%v err=%v", model, rewritten != nil, err)
+	}
+	var chatPayload map[string]any
+	if err := json.Unmarshal(rewritten, &chatPayload); err != nil {
+		t.Fatalf("chat payload: %v", err)
+	}
+	if chatPayload["model"] != "deepseek-flash" {
+		t.Fatalf("chat request model = %v, want deepseek-flash", chatPayload["model"])
+	}
+
+	rewritten, model, err = rewriteBodyModel(m, spec, "image_generation", []byte(`{"model":"gpt-image-2","prompt":"a cat"}`))
+	if err != nil {
+		t.Fatalf("image request must not fail rewrite: %v", err)
+	}
+	if rewritten != nil {
+		t.Fatalf("image request body must stay untouched, got %s", string(rewritten))
+	}
+	if model != "gpt-image-2" {
+		t.Fatalf("image request model = %q, want gpt-image-2", model)
+	}
+}
+
+func TestReserveModelAdmissionKeepsIDAndStillHonorsExplicitAccessFilters(t *testing.T) {
+	m := &manifest{ModelIDs: []string{codexReserveModel, "gpt-5.6-luna"}}
+	spec := &apiKeySpec{AccountIDs: []string{"no-eligible-account"}}
+	body := []byte(`{"model":"gpt-reserve","input":"hello"}`)
+	rewritten, model, err := rewriteBodyModel(m, spec, "text", body)
+	if err != nil || rewritten != nil || model != codexReserveModel {
+		t.Fatalf("Reserve must keep the original request unchanged: model=%q, err=%v", model, err)
+	}
+	spec.ExcludedModels = []string{codexReserveModel}
+	if validateClientModelVisible(m, spec, codexReserveModel, codexReserveModel) {
+		t.Fatal("persistent listing must not bypass an explicit API key model exclusion")
+	}
+	spec.ExcludedModels = nil
+	spec.AllowedModels = []string{"gpt-5.6-luna"}
+	if validateClientModelVisible(m, spec, codexReserveModel, codexReserveModel) {
+		t.Fatal("persistent listing must not bypass an explicit API key model allowlist")
+	}
+}
+
+func TestPrefixedCodexReserveKeepsVisibleLunaCapabilitiesAndExplicitContext(t *testing.T) {
+	spec := &apiKeySpec{ModelPrefix: "team"}
+	response := buildCodexClientModelsResponse([]string{"team/gpt-reserve"}, spec, map[string]int64{"gpt-reserve": 516000}, nil)
+	reserve := findCodexClientModelForTest(response["models"].([]map[string]any), "team/gpt-reserve")
+	if reserve == nil || reserve["visibility"] != "list" || reserve["display_name"] != "GPT-5.6 Reserve" {
+		t.Fatalf("prefixed Reserve = %#v", reserve)
+	}
+	if intFromAny(reserve["context_window"]) != 516000 || reserve["auto_compact_token_limit"] != nil {
+		t.Fatalf("explicit Reserve context must not set compaction: %#v", reserve)
 	}
 }
 
@@ -822,7 +1109,7 @@ func TestClientCatalogModelsIncludesAutoReviewWithoutPrefix(t *testing.T) {
 
 	models := clientCatalogModelsForAPIKey(m, spec)
 
-	if len(models) != 2 || models[0] != "team/gpt-5.4" || models[1] != codexAutoReviewModel {
+	if len(models) != 3 || models[0] != "team/gpt-5.4" || models[1] != "team/gpt-reserve" || models[2] != codexAutoReviewModel {
 		t.Fatalf("unexpected client catalog models: %#v", models)
 	}
 }
@@ -869,6 +1156,147 @@ func TestCockpitSelectorRestrictsAuthsToClientAPIKeyAccountScope(t *testing.T) {
 	}
 	if selected.ID != "account-scoped.json" {
 		t.Fatalf("expected only scoped account to be selected, got %q", selected.ID)
+	}
+}
+
+func TestAuthMatchesTargetAccountByManifestBusinessID(t *testing.T) {
+	auth := &coreauth.Auth{ID: "oauth-account.json", Provider: "codex"}
+	account := &accountSpec{ID: "business-account-id", AuthID: auth.ID}
+
+	if !authMatchesTargetAccount(auth, "business-account-id", account) {
+		t.Fatal("target account should match the manifest business account ID")
+	}
+	if !authMatchesTargetAccount(auth, "oauth-account.json", account) {
+		t.Fatal("target account should retain auth ID compatibility")
+	}
+	if authMatchesTargetAccount(auth, "different-account", account) {
+		t.Fatal("unrelated target account must not match")
+	}
+}
+
+func TestAuthMatchesTargetAccountByAPIKeyAttribute(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:         "codex:apikey:hash",
+		Provider:   "codex",
+		Attributes: map[string]string{"account_id": "api-key-business-id"},
+	}
+
+	if !authMatchesTargetAccount(auth, "api-key-business-id", nil) {
+		t.Fatal("API Key auth should match the business account attribute")
+	}
+}
+
+func TestTargetAccountHeaderRequiresInternalAPIKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	internal := &apiKeySpec{ID: "internal", Key: "internal-key", Internal: true, Enabled: true}
+	external := &apiKeySpec{ID: "client", Key: "client-key", Enabled: true}
+	policy := &requestPolicy{
+		manifest: &manifest{
+			ModelIDs: []string{"gpt-5.5"},
+			APIKeys:  []apiKeySpec{*internal, *external},
+			apiKeyByValue: map[string]*apiKeySpec{
+				internal.Key: internal,
+				external.Key: external,
+			},
+		},
+		tracker: newRequestUsageTracker(),
+	}
+	router := gin.New()
+	router.Use(policy.middleware())
+	seenTarget := map[string]string{}
+	router.POST("/v1/responses", func(c *gin.Context) {
+		target, _ := c.Request.Context().Value(targetAccountIDContextKey).(string)
+		seenTarget[c.GetString(ginUserAPIKeyKey)] = target
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	for _, key := range []string{internal.Key, external.Key} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5"}`))
+		request.Header.Set("Authorization", "Bearer "+key)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(targetAccountIDHeaderName, "target-account")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request with %s returned %d: %s", key, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	if got := seenTarget[internal.Key]; got != "target-account" {
+		t.Fatalf("internal API key target account = %q, want %q", got, "target-account")
+	}
+	if got := seenTarget[external.Key]; got != "" {
+		t.Fatalf("external API key must not pin a target account, got %q", got)
+	}
+}
+
+func TestInternalAPIKeyBypassesExcludedModels(t *testing.T) {
+	manifest := &manifest{
+		ModelIDs:       []string{"gpt-5.5"},
+		ExcludedModels: []string{"gpt-5.4"},
+	}
+	internal := &apiKeySpec{ID: "internal", Key: "internal-key", Internal: true, Enabled: true}
+	external := &apiKeySpec{ID: "client", Key: "client-key", Enabled: true}
+	body := []byte(`{"model":"gpt-5.4"}`)
+
+	if _, model, err := rewriteBodyModel(manifest, internal, "text", body); err != nil {
+		t.Fatalf("internal key should keep host-selected models available, got %v (model=%s)", err, model)
+	}
+	if _, _, err := rewriteBodyModel(manifest, external, "text", body); err == nil {
+		t.Fatal("excluded model must stay unavailable for external API keys")
+	}
+}
+
+func TestCockpitSelectorUsesOnlyAccountsWithCodexReserveEntitlement(t *testing.T) {
+	highPlanOrdinary := &accountSpec{
+		ID:                "ordinary-account",
+		AuthID:            "ordinary-account.json",
+		PlanRank:          intPtrForTest(500),
+		GPTReserveAllowed: false,
+	}
+	reserveAccount := &accountSpec{
+		ID:                "reserve-account",
+		AuthID:            "reserve-account.json",
+		PlanRank:          intPtrForTest(300),
+		GPTReserveAllowed: true,
+	}
+	selector := &cockpitSelector{
+		manifest: &manifest{
+			RoutingStrategy: "auto",
+			Accounts:        []accountSpec{*highPlanOrdinary, *reserveAccount},
+			accountByAuthID: map[string]*accountSpec{
+				"ordinary-account.json": highPlanOrdinary,
+				"reserve-account.json":  reserveAccount,
+			},
+			accountByID: map[string]*accountSpec{
+				"ordinary-account": highPlanOrdinary,
+				"reserve-account":  reserveAccount,
+			},
+		},
+	}
+	auths := []*coreauth.Auth{
+		{ID: "ordinary-account.json", Provider: "codex", Status: coreauth.StatusActive},
+		{ID: "reserve-account.json", Provider: "codex", Status: coreauth.StatusActive},
+	}
+
+	selected, err := selector.Pick(context.Background(), "codex", codexReserveModel, cliproxyexecutor.Options{}, auths)
+
+	if err != nil {
+		t.Fatalf("pick gpt-reserve auth: %v", err)
+	}
+	if selected == nil || selected.ID != "reserve-account.json" {
+		t.Fatalf("selected auth = %#v, want entitled account", selected)
+	}
+	ctx := context.WithValue(context.Background(), clientAPIKeyContextKey, &apiKeySpec{
+		ID: "ordinary-only", AccountIDs: []string{"ordinary-account"},
+	})
+	selected, err = selector.Pick(ctx, "codex", codexReserveModel, cliproxyexecutor.Options{}, auths)
+	if err == nil || selected != nil {
+		t.Fatal("must not use an out-of-scope entitled account or an ineligible scoped account")
+	}
+	selected, err = selector.Pick(context.Background(), "codex", codexReserveModel, cliproxyexecutor.Options{}, auths[:1])
+	if err == nil || selected != nil {
+		t.Fatal("an ordinary-only pool must fail instead of routing Reserve to an ordinary account")
 	}
 }
 
@@ -1195,6 +1623,20 @@ func TestLoadManifestIndexesAPIKeyAccounts(t *testing.T) {
 	}
 	if account.ID != "api-account" || account.UpstreamAPIKey != "sk-upstream" {
 		t.Fatalf("unexpected indexed account: %#v", account)
+	}
+}
+
+func TestLoadManifestDefaultsImageGenerationModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(path, []byte(`{"modelIds":["gpt-image-2"]}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	m, err := loadManifest(path)
+	if err != nil {
+		t.Fatalf("load manifest: %v", err)
+	}
+	if got := configuredImagesToolModel(m); got != defaultImagesToolModel {
+		t.Fatalf("default image model = %q, want %q", got, defaultImagesToolModel)
 	}
 }
 
@@ -2002,6 +2444,34 @@ func TestManifestRegistryModelsPreservesStaticThinkingSupport(t *testing.T) {
 	}
 }
 
+func TestManifestRegistryModelsPreservesAstraThinkingSupport(t *testing.T) {
+	models := manifestRegistryModels(&manifest{
+		ModelIDs: []string{"gpt-6-astra"},
+	})
+	info := findModelInfoForTest(models, "gpt-6-astra")
+	if info == nil {
+		t.Fatal("expected gpt-6-astra in manifest registry models")
+	}
+	if info.Thinking == nil {
+		t.Fatalf("Astra thinking support is missing: %#v", info)
+	}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max", "ultra"} {
+		found := false
+		for _, level := range info.Thinking.Levels {
+			if level == effort {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("Astra thinking levels missing %q: %#v", effort, info.Thinking.Levels)
+		}
+	}
+	if info.UserDefined {
+		t.Fatalf("Astra should use shipped static capabilities: %#v", info)
+	}
+}
+
 func TestManifestRegistryModelsCopiesSourceThinkingToAliases(t *testing.T) {
 	models := manifestRegistryModels(&manifest{
 		ModelAliases: []modelAliasSpec{{
@@ -2735,6 +3205,25 @@ func TestResolveModelRoutingRejectsRouteWithoutProviderGateway(t *testing.T) {
 	}
 }
 
+func TestMixedRoutingCatalogPreservesGPTCapabilities(t *testing.T) {
+	spec := mixedRoutingAPIKey(&providerGatewaySpec{
+		UpstreamModels: []string{"gpt-6-astra"},
+		WireAPI:        "responses",
+	})
+	catalog := buildCodexClientModelsResponse([]string{"gpt-6-astra", "cpa/gpt-6-astra"}, spec, nil, nil)
+	models := catalog["models"].([]map[string]any)
+	if models[1]["slug"] != "cpa/gpt-6-astra" {
+		t.Fatal("lost routing identity")
+	}
+	for _, field := range []string{"service_tiers", "additional_speed_tiers", "supported_reasoning_levels", "context_window"} {
+		a, _ := json.Marshal(models[0][field])
+		b, _ := json.Marshal(models[1][field])
+		if string(a) != string(b) {
+			t.Fatalf("%s differs: %s != %s", field, a, b)
+		}
+	}
+}
+
 func TestVisibleModelsForMixedRoutingIncludesNamespacedProviderModels(t *testing.T) {
 	m := &manifest{ModelIDs: []string{"gpt-5.5"}}
 	spec := &apiKeySpec{ModelRouting: &modelRoutingSpec{
@@ -2750,8 +3239,47 @@ func TestVisibleModelsForMixedRoutingIncludesNamespacedProviderModels(t *testing
 	}}
 
 	got := visibleModelsForAPIKey(m, spec)
-	want := []string{"gpt-5.5", "cpa/gpt-5.5", "cpa/grok-4.6"}
+	want := []string{"gpt-5.5", "gpt-reserve", "cpa/gpt-5.5", "cpa/grok-4.6"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("visible models = %#v, want %#v", got, want)
+	}
+}
+
+func TestAccountQuotaExhaustedOnlyBlocksKnownOAuthZeroQuota(t *testing.T) {
+	zero := 0
+	positive := 12
+	if !accountQuotaExhausted(nil, &accountSpec{AuthKind: "oauth", RemainingQuota: &zero}, time.Now()) {
+		t.Fatal("known zero OAuth quota should be exhausted")
+	}
+	if accountQuotaExhausted(nil, &accountSpec{AuthKind: "oauth", RemainingQuota: &positive}, time.Now()) {
+		t.Fatal("positive OAuth quota should remain available")
+	}
+	if accountQuotaExhausted(nil, &accountSpec{AuthKind: "oauth"}, time.Now()) {
+		t.Fatal("unknown OAuth quota should not be treated as exhausted")
+	}
+	if accountQuotaExhausted(nil, &accountSpec{AuthKind: "api_key", RemainingQuota: &zero}, time.Now()) {
+		t.Fatal("API-key accounts must use their own quota policy")
+	}
+}
+
+func TestCockpitSelectorSkipsExhaustedQuotaForRegularModels(t *testing.T) {
+	zero := 0
+	account := &accountSpec{ID: "account-1", AuthKind: "oauth", RemainingQuota: &zero, GPTReserveAllowed: true}
+	auth := &coreauth.Auth{ID: "auth-1", Provider: "codex"}
+	m := &manifest{
+		ModelIDs:        []string{"gpt-5.5", codexReserveModel},
+		Accounts:        []accountSpec{*account},
+		accountByAuthID: map[string]*accountSpec{"auth-1": account},
+	}
+	selector := &cockpitSelector{manifest: m}
+
+	selected, err := selector.Pick(context.Background(), "codex", "gpt-5.5", cliproxyexecutor.Options{}, []*coreauth.Auth{auth})
+	if selected != nil || err == nil {
+		t.Fatalf("regular model should be blocked by zero quota: selected=%v err=%v", selected, err)
+	}
+
+	selected, err = selector.Pick(context.Background(), "codex", codexReserveModel, cliproxyexecutor.Options{}, []*coreauth.Auth{auth})
+	if err != nil || selected != auth {
+		t.Fatalf("reserve model should keep its independent quota path: selected=%v err=%v", selected, err)
 	}
 }

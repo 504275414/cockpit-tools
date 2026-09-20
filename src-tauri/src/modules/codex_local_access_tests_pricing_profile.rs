@@ -1035,6 +1035,24 @@
         assert_eq!(luna.input_usd_per_million, 0.2);
         assert_eq!(luna.output_usd_per_million, 1.2);
         assert_eq!(luna.cached_input_usd_per_million, Some(0.02));
+
+        let astra =
+            resolve_effective_model_pricing(None, Some("gpt-6-astra"), Some(&short_usage), None)
+                .expect("gpt-6-astra pricing");
+        assert_eq!(astra.input_usd_per_million, 10.0);
+        assert_eq!(astra.output_usd_per_million, 50.0);
+        assert_eq!(astra.cached_input_usd_per_million, Some(1.0));
+
+        let astra_long = resolve_effective_model_pricing(
+            None,
+            Some("gpt-6-astra"),
+            Some(&long_usage),
+            Some("priority"),
+        )
+        .expect("gpt-6-astra priority long pricing");
+        assert_eq!(astra_long.input_usd_per_million, 40.0);
+        assert_eq!(astra_long.output_usd_per_million, 150.0);
+        assert_eq!(astra_long.cached_input_usd_per_million, Some(4.0));
     }
 
     #[test]
@@ -1209,6 +1227,7 @@ wire_api = "responses"
             .get("codex_local_access")
             .and_then(|item| item.as_table())
             .expect("unknown user fields should keep the provider table");
+        assert!(local_provider.get("experimental_bearer_token").is_none());
         assert_eq!(
             local_provider
                 .get("custom_user_option")
@@ -1514,6 +1533,7 @@ supports_websockets = false
         let mixed_config = format!(
             r#"model = "gpt-5.5"
 custom_setting = "keep"
+experimental_realtime_ws_base_url = "http://127.0.0.1:14998/v1"
 model_provider = "codex_local_access"
 model_catalog_json = "{}"
 
@@ -1557,6 +1577,7 @@ supports_websockets = false
         );
         assert!(restored_doc.get("model_provider").is_none());
         assert!(restored_doc.get("model_catalog_json").is_none());
+        assert!(restored_doc.get("experimental_realtime_ws_base_url").is_none());
         assert_eq!(
             fs::read_to_string(profile_dir.join(CODEX_PROFILE_AUTH_FILE))
                 .expect("read refreshed auth"),
@@ -1691,7 +1712,7 @@ supports_websockets = false
             .expect("save partial takeover backup");
         fs::write(
             profile_dir.join(CODEX_PROFILE_CONFIG_FILE),
-            "model_provider = \"codex_local_access\"\n",
+            "model_provider = \"codex_local_access\"\nexperimental_realtime_ws_base_url = \"http://localhost:14998/v1\"\n",
         )
         .expect("write partial config");
         fs::write(
@@ -2054,4 +2075,83 @@ supports_websockets = false
         assert!(stats.daily.api_keys.is_empty());
         assert_eq!(usage(&stats.weekly, "key-a"), (2, 300));
         assert_eq!(usage(&stats.monthly, "key-a"), (4, 1000));
+    }
+
+    #[test]
+    fn stats_maintenance_streams_all_rows_but_keeps_only_recent_events() {
+        let dir = make_temp_dir("codex-local-access-streaming-stats");
+        let db_path = dir.join("request_logs.sqlite");
+        let conn = open_local_access_logs_db_once(&db_path, true).expect("open logs db");
+        let now = now_ms();
+        let mut runtime_events = Vec::new();
+
+        for index in 0..250 {
+            let request_id = format!("req-{index:03}");
+            let usage = UsageCapture {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_tokens: 3,
+                cached_tokens: 0,
+                reasoning_tokens: 0,
+                token_breakdown: None,
+            };
+            let event = append_usage_event(
+                &mut runtime_events,
+                now - 250 + index,
+                Some(request_id.as_str()),
+                Some("acc-1"),
+                Some("user@example.com"),
+                Some("key-1"),
+                Some("Production Key"),
+                None,
+                Some("gpt-5.4"),
+                Some(CodexLocalAccessGatewayMode::Sidecar),
+                CodexLocalAccessRequestKind::Text,
+                None,
+                None,
+                true,
+                Some(200),
+                None,
+                None,
+                10,
+                Some(&usage),
+                None,
+                DEFAULT_MODEL_PRICING_VERSION,
+                0.0,
+            );
+            insert_local_access_usage_event(&conn, &event).expect("insert request log");
+        }
+
+        assert_eq!(runtime_events.len(), STATE_RECENT_USAGE_EVENT_LIMIT);
+        assert_eq!(runtime_events.first().unwrap().request_id, "req-150");
+
+        let (daily, weekly, monthly, recent_events) =
+            load_stats_windows_and_recent_events_from_conn(&conn, now)
+                .expect("stream stats windows");
+
+        assert_eq!(daily.totals.request_count, 250);
+        assert_eq!(weekly.totals.request_count, 250);
+        assert_eq!(monthly.totals.request_count, 250);
+        assert_eq!(recent_events.len(), STATE_RECENT_USAGE_EVENT_LIMIT);
+        assert_eq!(recent_events.first().unwrap().request_id, "req-150");
+        assert_eq!(recent_events.last().unwrap().request_id, "req-249");
+
+        drop(conn);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn compact_stats_snapshot_excludes_runtime_events() {
+        let mut stats = empty_stats_snapshot();
+        stats.totals.request_count = 7;
+        stats.events = vec![CodexLocalAccessUsageEvent {
+            request_id: "req-1".to_string(),
+            ..Default::default()
+        }];
+
+        let snapshot = stats_snapshot_without_events(&stats);
+
+        assert_eq!(snapshot.totals.request_count, 7);
+        assert!(snapshot.events.is_empty());
+        assert_eq!(stats.events.len(), 1);
     }

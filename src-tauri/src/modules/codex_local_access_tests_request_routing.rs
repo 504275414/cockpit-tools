@@ -890,7 +890,13 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             token_used: 0,
         };
 
-        let models = visible_codex_model_ids_for_api_key(&collection, &api_key, None);
+        let models = visible_codex_model_ids_for_api_key_with_supported_models(
+            &collection,
+            &api_key,
+            None,
+            None,
+            supported_codex_model_ids(),
+        );
         assert!(models
             .iter()
             .any(|model| model == CODEX_AUTO_REVIEW_MODEL_ID));
@@ -923,13 +929,30 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             token_used: 0,
         };
 
-        let models = visible_codex_model_ids_for_api_key(&collection, &api_key, None);
-        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+        let models = visible_codex_model_ids_for_api_key_with_supported_models(
+            &collection,
+            &api_key,
+            None,
+            None,
+            supported_codex_model_ids(),
+        );
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-6-astra",
+        ] {
             assert!(models.iter().any(|item| item == model));
         }
 
         api_key.allowed_models = vec!["gpt-5.4".to_string()];
-        let restricted = visible_codex_model_ids_for_api_key(&collection, &api_key, None);
+        let restricted = visible_codex_model_ids_for_api_key_with_supported_models(
+            &collection,
+            &api_key,
+            None,
+            None,
+            supported_codex_model_ids(),
+        );
         assert!(restricted.iter().any(|model| model == "gpt-5.4"));
         assert!(!restricted.iter().any(|model| model.starts_with("gpt-5.6-")));
     }
@@ -973,10 +996,11 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
         let catalog = vec!["gpt-5.6-sol".to_string(), "custom-model".to_string()];
         let visible = apply_codex_image_model_visibility(catalog.clone(), true);
         assert!(visible.iter().any(|model| model == CODEX_IMAGE_MODEL_ID));
-        assert_eq!(visible.len(), catalog.len() + 1);
+        assert_eq!(visible.len(), catalog.len() + 2);
 
         let hidden = apply_codex_image_model_visibility(visible, false);
         assert!(!hidden.iter().any(|model| model == CODEX_IMAGE_MODEL_ID));
+        assert!(!hidden.iter().any(|model| model == "gpt-image-2"));
     }
 
     #[test]
@@ -1257,6 +1281,29 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
     }
 
     #[test]
+    fn legacy_chat_completions_requests_preserve_max_reasoning_effort() {
+        let request = ParsedRequest {
+            method: "POST".to_string(),
+            target: "/v1/chat/completions".to_string(),
+            headers: HashMap::new(),
+            body: br#"{"model":"gpt-6-astra","reasoning_effort":"max","messages":[{"role":"user","content":"hello"}]}"#.to_vec(),
+        };
+
+        let (prepared, _) =
+            prepare_gateway_request_with_default_service_tier(request, Some("priority"))
+                .expect("request should map");
+        let mapped_body: Value =
+            serde_json::from_slice(&prepared.body).expect("mapped body should be json");
+        assert_eq!(
+            mapped_body
+                .get("reasoning")
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str),
+            Some("max")
+        );
+    }
+
+    #[test]
     fn legacy_chat_completions_requests_preserve_explicit_service_tier() {
         let cases = [
             (
@@ -1318,7 +1365,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             method: "POST".to_string(),
             target: "/v1/images/generations".to_string(),
             headers: HashMap::new(),
-            body: br#"{"model":"gpt-image-2","prompt":"draw a clean icon","size":"1024x1024","response_format":"b64_json"}"#.to_vec(),
+            body: br#"{"model":"gpt-image-2.5","prompt":"draw a clean icon","size":"1024x1024","response_format":"b64_json"}"#.to_vec(),
         };
 
         let (prepared, adapter) = prepare_gateway_request(request).expect("request should map");
@@ -1327,7 +1374,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             serde_json::from_slice(&prepared.body).expect("mapped body should be json");
         assert_eq!(
             mapped_body.get("model").and_then(Value::as_str),
-            Some("gpt-5.4-mini")
+            Some("gpt-5.5")
         );
         assert_eq!(
             mapped_body
@@ -1343,7 +1390,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
                 .and_then(|tools| tools.first())
                 .and_then(|tool| tool.get("model"))
                 .and_then(Value::as_str),
-            Some("gpt-image-2")
+            Some("gpt-image-2.5")
         );
         assert_eq!(
             mapped_body
@@ -2879,9 +2926,9 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
 
     #[test]
     fn default_codex_identity_headers_match_official_tui() {
-        assert!(super::DEFAULT_CODEX_USER_AGENT.starts_with("codex-tui/0.146.0"));
+        assert!(super::DEFAULT_CODEX_USER_AGENT.starts_with("codex-tui/0.153.4"));
         assert_eq!(super::DEFAULT_CODEX_ORIGINATOR, "codex-tui");
-        assert!(super::DEFAULT_CODEX_USER_AGENT.contains("(codex-tui; 0.146.0)"));
+        assert!(super::DEFAULT_CODEX_USER_AGENT.contains("(codex-tui; 0.153.4)"));
         assert!(!super::DEFAULT_CODEX_USER_AGENT.contains("codex_cli_rs"));
     }
 
@@ -2948,7 +2995,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
     }
 
     #[test]
-    fn deepseek_responses_api_key_accounts_are_not_eligible_for_local_access_pool() {
+    fn deepseek_responses_api_key_accounts_are_eligible_for_local_access_pool() {
         let mut account = CodexAccount::new_api_key(
             "deepseek-1".to_string(),
             "deepseek@example.com".to_string(),
@@ -2961,30 +3008,21 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         );
         account.api_wire_api = Some("responses".to_string());
 
-        assert!(!is_local_access_eligible_account(&account, false));
-        assert_eq!(
-            local_access_ineligible_reason(&account, false),
-            Some("deepseek_unsupported")
-        );
+        assert!(is_local_access_eligible_account(&account, false));
+        assert_eq!(local_access_ineligible_reason(&account, false), None);
         let (_, synced_ids, added_ids, skipped) = append_eligible_local_access_account_ids(
             &[],
             vec![account.id.clone()],
             &[account.clone()],
             false,
         );
-        assert!(synced_ids.is_empty());
-        assert!(added_ids.is_empty());
-        assert_eq!(
-            skipped
-                .iter()
-                .map(|item| (item.account_id.as_str(), item.reason.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("deepseek-1", "deepseek_unsupported")]
-        );
+        assert_eq!(synced_ids, vec![account.id.clone()]);
+        assert_eq!(added_ids, vec![account.id]);
+        assert!(skipped.is_empty());
     }
 
     #[test]
-    fn chat_completions_api_key_accounts_are_not_eligible_for_local_access_pool() {
+    fn chat_completions_api_key_accounts_are_eligible_for_local_access_pool() {
         let mut account = CodexAccount::new_api_key(
             "api-1".to_string(),
             "api-key@example.com".to_string(),
@@ -2997,7 +3035,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         );
         account.api_wire_api = Some("chat_completions".to_string());
 
-        assert!(!is_local_access_eligible_account(&account, false));
+        assert!(is_local_access_eligible_account(&account, false));
     }
 
     #[test]
@@ -3014,7 +3052,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         );
         account.api_wire_api = Some("chat_completions".to_string());
 
-        assert!(!is_local_access_eligible_account(&account, false));
+        assert!(is_local_access_eligible_account(&account, false));
         assert!(is_provider_gateway_eligible_account(&account));
     }
 
@@ -3066,6 +3104,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
+            "gpt-6-astra",
             "gpt-5.3-codex",
             "gpt-5.3-codex-spark",
         ] {
@@ -3081,6 +3120,7 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
         assert_eq!(
             default_codex_model_ids(),
             vec![
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",

@@ -107,9 +107,6 @@ pub struct UserConfig {
     /// 是否启用 Codex 客户端中的 API 服务额度显示注入
     #[serde(default = "default_codex_app_ui_injection_enabled")]
     pub codex_app_ui_injection_enabled: bool,
-    /// 是否全局允许 Codex app-server 第三方客户端（账户级开关仍可单独放行）
-    #[serde(default = "default_codex_cli_only_allow_app_server_clients")]
-    pub codex_cli_only_allow_app_server_clients: bool,
     /// Codex WSL 配置目录 (Windows Only)
     #[serde(default = "default_codex_wsl_config_dir")]
     pub codex_wsl_config_dir: String,
@@ -397,6 +394,9 @@ pub struct UserConfig {
     /// 切换 Codex 时是否自动启动/重启 Codex App
     #[serde(default = "default_codex_launch_on_switch")]
     pub codex_launch_on_switch: bool,
+    /// 启动时是否自动恢复 Codex 代理接管状态
+    #[serde(default = "default_codex_auto_restore_takeover_on_launch")]
+    pub codex_auto_restore_takeover_on_launch: bool,
     /// 切换 Antigravity IDE 时是否自动启动/重启应用
     #[serde(default = "default_antigravity_launch_on_switch")]
     pub antigravity_launch_on_switch: bool,
@@ -717,9 +717,6 @@ fn default_codex_app_ui_injection_enabled() -> bool {
     true
 }
 
-fn default_codex_cli_only_allow_app_server_clients() -> bool {
-    false
-}
 fn default_codex_wsl_config_dir() -> String {
     String::new()
 }
@@ -1010,6 +1007,9 @@ fn default_hermes_auth_overwrite_on_switch() -> bool {
 fn default_codex_launch_on_switch() -> bool {
     true
 }
+fn default_codex_auto_restore_takeover_on_launch() -> bool {
+    true
+}
 fn default_antigravity_launch_on_switch() -> bool {
     true
 }
@@ -1186,8 +1186,6 @@ impl Default for UserConfig {
             codex_auto_refresh_minutes: default_codex_auto_refresh(),
             codex_sync_wsl: default_codex_sync_wsl(),
             codex_app_ui_injection_enabled: default_codex_app_ui_injection_enabled(),
-            codex_cli_only_allow_app_server_clients:
-                default_codex_cli_only_allow_app_server_clients(),
             codex_wsl_config_dir: default_codex_wsl_config_dir(),
             zed_auto_refresh_minutes: default_zed_auto_refresh(),
             ghcp_auto_refresh_minutes: default_ghcp_auto_refresh(),
@@ -1291,6 +1289,8 @@ impl Default for UserConfig {
             openclaw_auth_overwrite_on_switch: default_openclaw_auth_overwrite_on_switch(),
             hermes_auth_overwrite_on_switch: default_hermes_auth_overwrite_on_switch(),
             codex_launch_on_switch: default_codex_launch_on_switch(),
+            codex_auto_restore_takeover_on_launch:
+                default_codex_auto_restore_takeover_on_launch(),
             antigravity_launch_on_switch: default_antigravity_launch_on_switch(),
             codex_restart_specified_app_on_switch: default_codex_restart_specified_app_on_switch(),
             codex_local_access_entry_visible: default_codex_local_access_entry_visible(),
@@ -2561,6 +2561,20 @@ mod tests {
     fn openclaw_auth_overwrite_default_is_disabled() {
         let cfg = UserConfig::default();
         assert!(!cfg.openclaw_auth_overwrite_on_switch);
+    }
+
+    #[test]
+    fn retired_codex_client_policy_is_ignored_when_loading_old_config() {
+        for enabled in [false, true] {
+            let cfg: UserConfig = serde_json::from_value(serde_json::json!({
+                "theme": "dark",
+                "codex_cli_only_allow_app_server_clients": enabled,
+            }))
+            .expect("old config remains readable");
+            let encoded = serde_json::to_value(&cfg).expect("serialize config");
+            assert_eq!(cfg.theme, "dark");
+            assert!(encoded.get("codex_cli_only_allow_app_server_clients").is_none());
+        }
     }
 
     #[test]

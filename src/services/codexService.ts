@@ -6,7 +6,6 @@ import {
   CodexApiProviderMode,
   CodexAppSpeed,
   CodexAppSpeedConfig,
-  CodexFingerprintMode,
   CodexBatchDeleteJobStatus,
   CodexProviderWireApi,
   CodexQuickConfig,
@@ -53,6 +52,13 @@ export async function getCodexQuickConfig(): Promise<CodexQuickConfig> {
   return await invoke('get_codex_quick_config');
 }
 
+/** 保存官方 Codex 实验性上下文管理开关。 */
+export async function saveCodexContextManagement(
+  experimentalMode: boolean,
+): Promise<CodexQuickConfig> {
+  return await invoke('save_codex_context_management', { experimentalMode });
+}
+
 /** 保存 Codex config.toml 快捷配置 */
 export async function saveCodexQuickConfig(
   modelContextWindow?: number,
@@ -66,6 +72,19 @@ export async function saveCodexQuickConfig(
     autoCompactTokenLimit: autoCompactTokenLimit ?? null,
     experimentalModelCatalogEnabled: experimentalModelCatalogEnabled ?? null,
     experimentalModelCatalogModels: experimentalModelCatalogModels ?? null,
+    experimentalModelCatalogDefaultModelId: experimentalModelCatalogDefaultModelId ?? null,
+  });
+}
+
+/** 保存 Codex 可见模型，不修改当前上下文窗口配置。 */
+export async function saveCodexModelCatalog(
+  experimentalModelCatalogEnabled: boolean,
+  experimentalModelCatalogModels: CodexExperimentalModelDefinition[],
+  experimentalModelCatalogDefaultModelId?: string | null,
+): Promise<CodexQuickConfig> {
+  return await invoke('save_codex_model_catalog', {
+    experimentalModelCatalogEnabled,
+    experimentalModelCatalogModels,
     experimentalModelCatalogDefaultModelId: experimentalModelCatalogDefaultModelId ?? null,
   });
 }
@@ -297,8 +316,16 @@ export async function importCodexAccessTokenAccount(
   });
 }
 
-export async function importCodexFromLocal(): Promise<CodexAccount> {
-  return await invoke('import_codex_from_local');
+/**
+ * 从官方 Codex 本机凭据存储导入账号。
+ *
+ * `instanceId` 省略或为 `null` 时读取默认实例；传入多开实例 ID 时读取该实例的
+ * profile 目录（官方客户端按 `CODEX_HOME` 分别落盘凭据）。
+ */
+export async function importCodexFromLocal(
+  instanceId?: string | null,
+): Promise<CodexAccount> {
+  return await invoke('import_codex_from_local', { instanceId: instanceId ?? null });
 }
 
 /** 从 JSON 字符串导入账号 */
@@ -430,12 +457,13 @@ export async function refreshAllCodexQuotas(): Promise<number> {
 /** 按 ID 列表限流并发刷新配额（分组/本地访问批量）；后端统一限流并只做一次 tray 更新 */
 export async function refreshCodexQuotasBatch(
   accountIds: string[],
-  options?: { respectGroupQuotaRefresh?: boolean },
+  options?: { respectGroupQuotaRefresh?: boolean; background?: boolean },
 ): Promise<number> {
   return await invoke('refresh_codex_quotas_batch', {
     accountIds,
     // 缺省 true：遵守分组「额度刷新」开关；显式刷新分组时传 false
     respectGroupQuotaRefresh: options?.respectGroupQuotaRefresh ?? true,
+    background: options?.background ?? false,
   });
 }
 
@@ -536,6 +564,26 @@ export async function updateCodexAccountName(
   return await invoke('update_codex_account_name', { accountId, name });
 }
 
+/**
+ * 通过 Grok 平台账号添加 Codex 供应商账号。
+ *
+ * 账号本身不保存上游 API Key：运行态使用绑定的 Grok 账号 OAuth 令牌，
+ * 并由 Grok 账号的模型目录决定客户端可见模型。
+ */
+export async function addCodexAccountFromGrok(
+  grokAccountId: string,
+  options?: {
+    apiModelCatalog?: string[] | null;
+    accountName?: string | null;
+  },
+): Promise<CodexAccount> {
+  return await invoke('add_codex_account_from_grok', {
+    grokAccountId,
+    apiModelCatalog: options?.apiModelCatalog ?? null,
+    accountName: options?.accountName ?? null,
+  });
+}
+
 export async function updateCodexApiKeyCredentials(
   accountId: string,
   apiKey: string,
@@ -629,37 +677,18 @@ export async function updateCodexAccountTags(
   return await invoke('update_codex_account_tags', { accountId, tags });
 }
 
-export async function updateCodexAccountsFingerprintMode(
-  accountIds: string[],
-  mode: CodexFingerprintMode,
-): Promise<CodexAccount[]> {
-  return await invoke('update_codex_accounts_fingerprint_mode', {
-    accountIds,
-    mode,
-  });
-}
-
-export async function updateCodexAccountClientPolicy(
-  accountId: string,
-  codexCliOnly: boolean,
-  allowAppServer: boolean,
-): Promise<CodexAccount> {
-  return await invoke('update_codex_account_client_policy', {
-    accountId,
-    codexCliOnly,
-    allowAppServer,
-  });
-}
 
 export async function updateCodexAccountInstanceAccess(
   accountId: string,
   accessMode?: string | null,
   startupModel?: string | null,
+  imageGenerationAccountIds?: string[] | null,
 ): Promise<CodexAccount> {
   return await invoke('update_codex_account_instance_access', {
     accountId,
     accessMode: accessMode ?? null,
     startupModel: startupModel ?? null,
+    imageGenerationAccountIds: imageGenerationAccountIds ?? null,
   });
 }
 
@@ -704,4 +733,13 @@ export async function fetchCodexAccountNoteMailUrl(
   mailUrl: string,
 ): Promise<CodexMailPreviewFetchResult> {
   return await invoke('fetch_codex_account_note_mail_url', { mailUrl });
+}
+
+export async function restoreCodexActiveTakeoverIfEnabled(): Promise<boolean> {
+  try {
+    return await invoke<boolean>('restore_codex_active_takeover_if_enabled');
+  } catch (e) {
+    console.warn('[Codex Auto-Restore] 恢复代理接管失败:', e);
+    return false;
+  }
 }
