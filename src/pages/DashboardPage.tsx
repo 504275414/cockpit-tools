@@ -47,7 +47,9 @@ import {
   TraeAccount,
   getTraeAccountPlatformId,
   getTraeUsage,
+  getTraeQuotaCategoryGroups,
 } from '../types/trae';
+import { TraeQuotaCategoryList } from '../components/trae/TraeQuotaCategoryList';
 import {
   WorkbuddyAccount,
   getWorkbuddyOfficialQuotaModel,
@@ -281,7 +283,7 @@ export function DashboardPage({
   onOpenPlatformLayout,
   onEasterEggTriggerClick,
 }: DashboardPageProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const antigravityRuntimeTarget = useAntigravityRuntimeTarget();
 
   const [tagModalState, setTagModalState] = React.useState<{ accountId: string; platform: PlatformId | 'codebuddy_cn'; tags: string[] } | null>(null);
@@ -2152,6 +2154,7 @@ export function DashboardPage({
     sublineText,
     sublineTitle,
     maxMetrics = 3,
+    quotaSection,
     onEditTags,
   }: {
     presentation: UnifiedAccountPresentation;
@@ -2163,6 +2166,7 @@ export function DashboardPage({
     sublineText?: string;
     sublineTitle?: string;
     maxMetrics?: number;
+    quotaSection?: React.ReactNode;
     onEditTags?: () => void;
   }) => {
     const resolvedSublineText = sublineText || presentation.sublineText || '';
@@ -2191,7 +2195,7 @@ export function DashboardPage({
         )}
 
         <div className="account-mini-quotas">
-          {renderPresentationQuotaItems(presentation, maxMetrics)}
+          {quotaSection ?? renderPresentationQuotaItems(presentation, maxMetrics)}
         </div>
 
         <div className="account-mini-actions icon-only-row">
@@ -2634,8 +2638,49 @@ export function DashboardPage({
     if (!account) return <div className="empty-slot">{t('dashboard.noAccount', '无账号')}</div>;
 
     const presentation = buildTraeAccountPresentation(account, t);
+    const quotaGroups = getTraeQuotaCategoryGroups(account, (key, defaultValue) =>
+      t(key, defaultValue || key),
+    );
+    const quotaSection =
+      quotaGroups.length > 0 ? (
+        <TraeQuotaCategoryList
+          groups={quotaGroups}
+          formatValue={(val, unit) => {
+            if (val === -1) return t('trae.quota.fastUnlimited', '无限次');
+            const numStr = val.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+            if (unit === 'fast_request') return `${numStr} 次`;
+            if (unit === 'usd') return `$${numStr}`;
+            return numStr;
+          }}
+          formatDateTime={(timeMs) => {
+            if (timeMs == null || !Number.isFinite(timeMs)) return null;
+            const date = new Date(timeMs);
+            const locale = i18n.language;
+            if (locale && locale.startsWith('zh')) {
+              const year = date.getFullYear();
+              const month = String(date.getMonth() + 1).padStart(2, '0');
+              const day = String(date.getDate()).padStart(2, '0');
+              const hour = String(date.getHours()).padStart(2, '0');
+              const minute = String(date.getMinutes()).padStart(2, '0');
+              const second = String(date.getSeconds()).padStart(2, '0');
+              return `${year}年 ${month}月${day}日 ${hour}:${minute}:${second}`;
+            }
+            return date.toLocaleString('en-US', {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            });
+          }}
+          variant="card"
+        />
+      ) : undefined;
     return renderUnifiedAccountCard({
       presentation,
+      quotaSection,
       onRefresh: () => handleRefreshTrae(account.id),
       onSwitch: () => handleSwitchTrae(account.id, platformId),
       isRefreshing: refreshing.has(account.id),
