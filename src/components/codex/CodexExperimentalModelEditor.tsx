@@ -27,6 +27,7 @@ import {
 import {
   deriveAutoCompactTokenLimit,
   deriveAutoCompactTokenLimitInput,
+  getCodexModelContextTemplate,
   validateModelContext,
 } from "../../utils/codexModelContext";
 import { getCodexModelReasoningEfforts } from "../../services/codexService";
@@ -721,15 +722,17 @@ export function CodexExperimentalModelEditor({
 
   const openCustomContextEditor = (index: number) => {
     const model = models[index];
+    const template = model.context_window == null ? getCodexModelContextTemplate(model.model_id) : undefined;
     setOpenContextIndex(null);
     const contextWindow =
-      model.context_window ?? DEFAULT_CONTEXT_DRAFT.context_window;
+      model.context_window ?? template?.context_window ?? DEFAULT_CONTEXT_DRAFT.context_window;
     setCustomContextDraft({
       index,
       contextWindow: String(contextWindow),
-      // 不再用 1M 兜底：压缩阈值缺失时按上下文窗口的 90% 派生。
+      // 已保存值优先；无覆盖时读取模板，压缩阈值缺失时按窗口的 90% 派生。
       autoCompactTokenLimit: String(
         model.auto_compact_token_limit ??
+          (model.context_window == null ? template?.auto_compact_token_limit : undefined) ??
           (deriveAutoCompactTokenLimitInput(String(contextWindow)) ||
             DEFAULT_CONTEXT_DRAFT.auto_compact_token_limit),
       ),

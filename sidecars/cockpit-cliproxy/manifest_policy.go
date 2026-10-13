@@ -1780,11 +1780,18 @@ func ollamaModelFamily(model string) string {
 }
 
 func ollamaContextLength(model string) int {
+	if template, found := registry.GetCodexModelContextTemplate(model); found {
+		return template.ContextWindow
+	}
+	for _, prefix := range []string{"gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"} {
+		if strings.HasPrefix(model, prefix) {
+			if template, found := registry.GetCodexModelContextTemplate(prefix); found {
+				return template.ContextWindow
+			}
+			panic(fmt.Errorf("missing Codex context template in codex_client_models.json for %s", model))
+		}
+	}
 	switch {
-	case strings.HasPrefix(model, "gpt-6.1-sol"):
-		return 272000
-	case strings.HasPrefix(model, "gpt-6-astra"), strings.HasPrefix(model, "gpt-6-sol"), strings.HasPrefix(model, "gpt-6-luna"):
-		return 256000
 	// 以下家族值统一收敛到 Codex 客户端目录（codex_client_models.json）真值，
 	// 避免同一个模型在目录、Ollama 兼容层与 API 服务里报出不同的上下文。
 	case strings.HasPrefix(model, "gpt-5.6"):

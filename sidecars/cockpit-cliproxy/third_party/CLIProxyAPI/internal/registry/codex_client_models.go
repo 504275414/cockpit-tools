@@ -129,6 +129,38 @@ func GetCodexClientModelsJSON() []byte {
 	return data
 }
 
+type CodexModelContextTemplate struct {
+	ContextWindow         int  `json:"context_window"`
+	MaxContextWindow      int  `json:"max_context_window"`
+	AutoCompactTokenLimit *int `json:"auto_compact_token_limit"`
+}
+
+// GetCodexModelContextTemplate returns the model's context fields; Reserve follows Luna.
+func GetCodexModelContextTemplate(modelID string) (CodexModelContextTemplate, bool) {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if modelID == "gpt-reserve" {
+		modelID = "gpt-5.6-luna"
+	}
+	var catalog struct {
+		Models []struct {
+			Slug string `json:"slug"`
+			CodexModelContextTemplate
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(GetCodexClientModelsJSON(), &catalog); err != nil {
+		log.Panicf("registry: decode codex_client_models.json context fields for model %q: %v", modelID, err)
+	}
+	for _, model := range catalog.Models {
+		if strings.EqualFold(model.Slug, modelID) {
+			if model.ContextWindow <= 0 {
+				log.Panicf("registry: invalid context_window in codex_client_models.json for model %q", modelID)
+			}
+			return model.CodexModelContextTemplate, true
+		}
+	}
+	return CodexModelContextTemplate{}, false
+}
+
 func CodexClientModelBaseInstructions(modelID string) string {
 	var payload codexClientModelsPayload
 	if json.Unmarshal(GetCodexClientModelsJSON(), &payload) != nil {
