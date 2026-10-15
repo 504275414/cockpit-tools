@@ -1,3 +1,4 @@
+import modelCatalog from "../../sidecars/cockpit-cliproxy/third_party/CLIProxyAPI/internal/registry/models/models.json";
 import {
   DEEPSEEK_API_PROVIDER_ID,
   resolveCodexApiProviderPresetId,
@@ -50,21 +51,20 @@ export function buildProviderModelVisionCapabilities(
 
 /**
  * 模型识图默认规则（与 Rust 侧 `codex_account::model_defaults_to_vision_input` 同一口径）：
- * `gpt-5.5` 及以上（含 5.5）默认支持图片输入；其它模型不受影响。
- * 兼容 `openai/gpt-5.6-sol` 这类命名空间前缀与 `-luna` / `-sol` 这类后缀。
+ * 按随程序附带的 models.json 查找完整模型 ID，输入类型包含 image 时默认支持图片。
+ * 未找到模型或缺少图片输入声明时默认 false。
+ * 允许 `openai/gpt-5.6-sol` 这类命名空间前缀；逐模型设置与供应商默认值仍优先。
  */
 export function providerModelDefaultsToVisionInput(modelId: string): boolean {
   const normalized = (modelId ?? "").trim().toLowerCase();
   const name = normalized.split("/").pop() ?? "";
-  if (!name.startsWith("gpt-")) return false;
-  const rest = name.slice("gpt-".length);
-  const head = rest.split(/[^0-9.]/)[0] ?? "";
-  const [majorRaw, minorRaw] = head.split(".");
-  const major = Number.parseInt(majorRaw ?? "", 10);
-  if (!Number.isFinite(major)) return false;
-  const parsedMinor = Number.parseInt(minorRaw ?? "", 10);
-  const minor = Number.isFinite(parsedMinor) ? parsedMinor : 0;
-  return major > 5 || (major === 5 && minor >= 5);
+  return Object.values(modelCatalog).some((models) =>
+    models.some((model) =>
+      model.id.trim().toLowerCase() === name &&
+      "supportedInputModalities" in model &&
+      model.supportedInputModalities?.includes("image") === true,
+    ),
+  );
 }
 
 /**

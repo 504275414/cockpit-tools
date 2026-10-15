@@ -122,7 +122,7 @@ fn automatic_api_service_vision_routing_model(
     vision_model.cloned()
 }
 
-/// 单个模型的识图能力：用户显式开关优先，其次 gpt-5.5+ 默认支持，最后取官方 DeepSeek 默认值。
+/// 单个模型的识图能力：用户显式开关优先，其次取 models.json 的图片输入声明，最后取官方 DeepSeek 默认值。
 fn automatic_api_service_account_model_vision(account: &CodexAccount, model: &str) -> bool {
     let key = model.trim();
     if let Some(value) = account
