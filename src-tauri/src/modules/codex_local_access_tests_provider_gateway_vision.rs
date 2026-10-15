@@ -159,7 +159,7 @@ fn provider_vision_record_matches_by_id_or_base_url() {
 }
 
 #[test]
-fn gpt_5_5_and_later_default_to_vision_without_any_configuration() {
+fn catalog_image_declarations_determine_vision_without_any_configuration() {
     let models = vec![
         "openai/gpt-5.6-sol".to_string(),
         "gpt-5.5".to_string(),
@@ -177,7 +177,7 @@ fn gpt_5_5_and_later_default_to_vision_without_any_configuration() {
     let gateway_supports_vision =
         super::merge_provider_vision_capabilities(&mut capabilities, &account, None, &models);
 
-    // 供应商/账号都没有声明：gpt-5.5+ 默认支持，5.5 以下维持原样。
+    // 供应商/账号都没有声明：采用 models.json 的图片输入声明；目录缺少的 gpt-5.4 默认 false。
     assert!(!gateway_supports_vision);
     assert_eq!(
         capabilities
@@ -200,7 +200,7 @@ fn gpt_5_5_and_later_default_to_vision_without_any_configuration() {
 }
 
 #[test]
-fn explicit_per_model_disable_beats_gpt_5_5_default() {
+fn explicit_per_model_disable_beats_catalog_image_declaration() {
     let models = vec!["gpt-5.6-sol".to_string()];
     let account = provider_vision_test_account(
         "cmp_unset",

@@ -122,26 +122,38 @@ test("skips the official DeepSeek provider", () => {
 });
 
 // 与 Rust 侧 codex_account_tests_model_vision 使用同一组模型，防止两处规则漂移。
-test("gpt-5.5 and later default to vision input", () => {
+test("models with catalog image input declarations default to vision input", () => {
   for (const model of [
     "gpt-5.5",
-    "gpt-5.5-pro",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
+    "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
+    "codex-auto-review",
+    "claude-haiku-4-5",
+    "claude-haiku-5-5",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "gemini-3.8-flash",
+    "gemini-4-argon",
+    "grok-4.7",
     "openai/gpt-5.6-sol",
     "openai/gpt-6-astra",
     "openai/gpt-6-sol",
+    " OPENAI/GPT-6-LUNA ",
   ]) {
-    assert.equal(providerModelDefaultsToVisionInput(model), true, `${model} 应默认识图`);
+    assert.equal(providerModelDefaultsToVisionInput(model), true, `${model} 在目录中声明图片输入，应默认识图`);
   }
 });
 
-test("other models keep previous defaults", () => {
+test("models absent from the catalog or without image declarations default to false", () => {
   for (const model of [
+    "gpt-5.5-pro",
+    "gpt-6-luna-custom",
+    "gpt-99.0",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.3-codex",
@@ -150,12 +162,11 @@ test("other models keep previous defaults", () => {
     "gpt-3.5-turbo",
     "gpt-reserve",
     "gpt-image-2.5",
-    "codex-auto-review",
     "deepseek-v4-pro",
     "claude-sonnet-4-5",
     "gemini-2.5-pro",
     "glm-4.6",
   ]) {
-    assert.equal(providerModelDefaultsToVisionInput(model), false, `${model} 不应被默认规则影响`);
+    assert.equal(providerModelDefaultsToVisionInput(model), false, `${model} 未找到或未声明图片输入，应默认不支持`);
   }
 });
