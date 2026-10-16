@@ -12,6 +12,8 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/codex/historyprojection"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -69,6 +71,13 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload
 	}
+	return rewriteCodexAgentMessageInput(payload)
+}
+
+// RewriteCodexAgentMessagesForCompatibility adapts private message items for a
+// confirmed third-party endpoint, independently of optional client optimizations.
+func RewriteCodexAgentMessagesForCompatibility(payload []byte) []byte {
+	payload = removeCodexCollaborationMessageEncryption(payload, codexCollaborationMessageToolPaths(payload))
 	return rewriteCodexAgentMessageInput(payload)
 }
 
@@ -253,7 +262,7 @@ func loadCodexCatalogTemplates() (map[string]map[string]any, map[string]any, uin
 			continue
 		}
 		templates[modelID] = model
-		if modelID == "gpt-5.5" {
+		if modelID == "gpt-5.6-sol" {
 			defaultTemplate = model
 		}
 	}
@@ -400,7 +409,7 @@ func codexSpawnAgentModelsFromSources(availableModels []map[string]any, catalogJ
 			continue
 		}
 		templates[modelID] = model
-		if modelID == "gpt-5.5" {
+		if modelID == "gpt-5.6-sol" {
 			defaultTemplate = model
 		}
 	}
@@ -434,7 +443,7 @@ func codexSpawnAgentModelsFromTemplates(availableModels []map[string]any, templa
 			continue
 		}
 
-		profile := codexSpawnAgentModelFromMetadata(modelID, defaultTemplate)
+		profile := codexSpawnAgentModelFromMetadata(modelID, codexmodels.ConservativeFallbackTemplate(defaultTemplate))
 		profile.id = modelID
 		profile.description = mapString(availableModel, "description")
 		profile.displayName = mapString(availableModel, "display_name")
@@ -789,6 +798,34 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 		if errSet != nil {
 			return payload
 		}
+		// Agent routing metadata is not part of a standard Responses message.
+		// Preserve it as text, rather than forwarding unknown top-level fields.
+		metadata := make(map[string]json.RawMessage)
+		for _, key := range []string{"author", "recipient", "id", "internal_chat_message_metadata_passthrough"} {
+			if value := item.Get(key); value.Exists() {
+				metadata[key] = json.RawMessage(value.Raw)
+				updated, errSet = sjson.DeleteBytes(updated, itemPath+"."+key)
+				if errSet != nil {
+					return payload
+				}
+			}
+		}
+		if len(metadata) > 0 {
+			encoded, err := json.Marshal(metadata)
+			if err != nil {
+				return payload
+			}
+			content := gjson.GetBytes(updated, itemPath+".content")
+			if !content.IsArray() {
+				return payload
+			}
+			updated, errSet = sjson.SetBytes(updated, itemPath+".content.-1", map[string]string{
+				"type": "input_text", "text": "Agent routing metadata: " + string(encoded),
+			})
+			if errSet != nil {
+				return payload
+			}
+		}
 	}
 	return updated
 }
@@ -1005,4 +1042,168 @@ func removeCodexSpawnAgentModelSections(description string) (string, string) {
 		}
 	}
 	return cleaned.String(), headingIndent
+}
+
+// flatCollaborationToolPrefixes lists the flat namespace spellings third-party
+// models produce when they collapse Codex's collaboration namespace into the
+// function name instead of keeping the namespace field.
+var flatCollaborationToolPrefixes = []string{
+	codexCollaborationNamespace + "::",
+	codexCollaborationNamespace + ".",
+	codexCollaborationNamespace + "__",
+	codexOptimizedCollaborationNamespace + "::",
+	codexOptimizedCollaborationNamespace + ".",
+	codexOptimizedCollaborationNamespace + "__",
+}
+
+// RestoreCodexCollaborationFlatToolNames rewrites flat collaboration tool names
+// into the structured {name, namespace} shape Codex clients register. Models
+// that do not understand Responses namespaces often emit
+// `collaboration::spawn_agent`, `collaboration.spawn_agent` or
+// `collaboration__spawn_agent`; without this normalization the client rejects
+// the call as unsupported.
+func RestoreCodexCollaborationFlatToolNames(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if errDecode := decoder.Decode(&value); errDecode != nil {
+		return payload
+	}
+	if !restoreFlatCollaborationToolNameValue(value) {
+		return payload
+	}
+	restored, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		return payload
+	}
+	return restored
+}
+
+func restoreFlatCollaborationToolNameValue(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if restoreFlatCollaborationToolNameValue(item) {
+				changed = true
+			}
+		}
+	case map[string]any:
+		itemType := strings.TrimSpace(mapString(typed, "type"))
+		isToolCall := itemType == "function_call" || itemType == "custom_tool_call"
+		isToolOutput := itemType == "function_call_output" || itemType == "custom_tool_call_output"
+		if isToolCall {
+			if name, ok := typed["name"].(string); ok {
+				if tool, okSplit := splitFlatCollaborationToolName(name); okSplit {
+					typed["name"] = tool
+					typed["namespace"] = codexCollaborationNamespace
+					changed = true
+				}
+			}
+		}
+		for key, child := range typed {
+			if isToolCall && (key == "arguments" || key == "input") {
+				continue
+			}
+			if isToolOutput && key == "output" {
+				continue
+			}
+			if restoreFlatCollaborationToolNameValue(child) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func splitFlatCollaborationToolName(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	for _, prefix := range flatCollaborationToolPrefixes {
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		tool := strings.TrimSpace(strings.TrimPrefix(name, prefix))
+		if tool == "" || strings.Contains(tool, ":") || strings.Contains(tool, ".") {
+			continue
+		}
+		return tool, true
+	}
+	return "", false
+}
+
+// collaborationArgumentToolNames lists collaboration tools whose arguments are
+// replayed to Codex clients as strictly typed JSON.
+var collaborationArgumentToolNames = map[string]struct{}{
+	"spawn_agent":     {},
+	"send_message":    {},
+	"followup_task":   {},
+	"interrupt_agent": {},
+	"list_agents":     {},
+	"wait_agent":      {},
+	"send_input":      {},
+	"resume_agent":    {},
+	"close_agent":     {},
+}
+
+// NormalizeCodexCollaborationArguments rewrites integer-valued floating point
+// numbers inside collaboration tool arguments (for example
+// `{"timeout_ms":180000.0}`) into integers. Codex clients deserialize these
+// schemas as i64 and reject float payloads produced by some third-party models.
+func NormalizeCodexCollaborationArguments(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var value any
+	if errDecode := decoder.Decode(&value); errDecode != nil {
+		return payload
+	}
+	if !normalizeCollaborationArgumentValue(value) {
+		return payload
+	}
+	normalized, errMarshal := json.Marshal(value)
+	if errMarshal != nil {
+		return payload
+	}
+	return normalized
+}
+
+func normalizeCollaborationArgumentValue(value any) bool {
+	changed := false
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if normalizeCollaborationArgumentValue(item) {
+				changed = true
+			}
+		}
+	case map[string]any:
+		itemType := strings.TrimSpace(mapString(typed, "type"))
+		if itemType == "function_call" {
+			name := strings.TrimSpace(mapString(typed, "name"))
+			namespace := strings.TrimSpace(mapString(typed, "namespace"))
+			_, isCollaborationTool := collaborationArgumentToolNames[name]
+			if isCollaborationTool || namespace == codexCollaborationNamespace {
+				if raw, ok := typed["arguments"].(string); ok {
+					if normalized := historyprojection.NormalizeIntegralNumbersInArguments(raw); normalized != raw {
+						typed["arguments"] = normalized
+						changed = true
+					}
+				}
+			}
+		}
+		for key, child := range typed {
+			if key == "arguments" || key == "input" {
+				continue
+			}
+			if normalizeCollaborationArgumentValue(child) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }

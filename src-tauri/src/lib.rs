@@ -1,8 +1,20 @@
+// HTTP/2 transport and credential-refresh futures need the same trait-checking
+// depth in Windows production builds as in the test harness.
+#![recursion_limit = "256"]
+
 mod commands;
 pub mod error;
 mod models;
 mod modules;
 mod utils;
+
+#[cfg(test)]
+mod dependency_tls_tests;
+
+#[cfg(target_os = "windows")]
+pub fn try_run_codex_package_launcher() -> Option<i32> {
+    modules::process::codex_package_launcher::try_run()
+}
 
 use modules::config::CloseWindowBehavior;
 use modules::logger;
@@ -313,6 +325,9 @@ fn summarize_deep_link_args(args: &[String]) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(code) = modules::codex_continuity_worker::try_run() {
+        std::process::exit(code);
+    }
     logger::init_logger();
     modules::diagnostics::install_panic_hook();
     modules::diagnostics::start_frontend_ready_watchdog();
@@ -329,6 +344,7 @@ pub fn run() {
     }
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -403,12 +419,23 @@ pub fn run() {
 
             // 一次性迁移：历史版本可能被自动开启的「模型管理」统一关闭，之后由用户自己决定。
             std::thread::spawn(|| {
+                // Recover interrupted explicit imports before other model maintenance
+                // can touch the same profiles. None of this gates the main window.
+                modules::codex_account::recover_pending_model_config_imports_for_known_profiles();
                 let migrated =
                     modules::codex_account::migrate_model_management_default_off_for_all_profiles();
                 if migrated > 0 {
                     logger::log_info(&format!(
                         "[Codex模型目录] 已按新默认关闭历史模型管理: profiles={}",
                         migrated
+                    ));
+                }
+                // 受管模型目录版本校验在恢复和迁移后继续执行。
+                let rebuilt = modules::codex_account::rebuild_stale_managed_model_catalogs();
+                if rebuilt > 0 {
+                    logger::log_info(&format!(
+                        "[Codex模型目录] 启动校验已重建落后模型目录: profiles={}",
+                        rebuilt
                     ));
                 }
             });
@@ -446,6 +473,9 @@ pub fn run() {
                     }
                 }
             });
+
+            tauri::async_runtime::spawn(modules::codex_proxy_catalog::auto_refresh_loop());
+            tauri::async_runtime::spawn(modules::codex_proxy_desktop_router::restore_on_startup());
 
             // 启动 WebSocket 服务（使用 Tauri 的 async runtime）
             tauri::async_runtime::spawn(async {
@@ -796,6 +826,8 @@ pub fn run() {
             commands::account::fetch_account_note_mail_url,
             commands::account::load_account_groups,
             commands::account::save_account_groups,
+            commands::account::load_platform_account_groups,
+            commands::account::save_platform_account_groups,
             commands::account::sync_current_from_client,
             commands::account::sync_from_extension,
             // Device Commands
@@ -905,7 +937,6 @@ pub fn run() {
             commands::system::codex_ssh_test_connection,
             commands::system::codex_ssh_sync_current,
             commands::system::codex_managed_lb_provider_id,
-            commands::system::codebuddy_list_local_session_files,
             commands::system::save_refresh_interval_config,
             commands::system::save_tray_platform_layout,
             commands::system::set_app_path,
@@ -926,6 +957,8 @@ pub fn run() {
             commands::system::hide_floating_card_window,
             commands::system::hide_current_floating_card_window,
             commands::system::set_floating_card_always_on_top,
+            commands::system::update_floating_card_appearance,
+            commands::system::resize_current_floating_card_window,
             commands::system::set_current_floating_card_window_always_on_top,
             commands::system::set_floating_card_confirm_on_close,
             commands::system::save_floating_card_position,
@@ -996,6 +1029,7 @@ pub fn run() {
             commands::codex::list_codex_accounts,
             commands::codex::get_current_codex_account,
             commands::codex::get_codex_config_toml_path,
+            commands::codex::get_codex_storage_paths,
             commands::codex::open_codex_config_toml,
             commands::codex::get_codex_quick_config,
             commands::codex::save_codex_context_management,
@@ -1012,6 +1046,11 @@ pub fn run() {
             commands::codex::codex_clear_client_auth_observation,
             commands::codex::switch_codex_account,
             commands::codex::codex_cancel_account_switch,
+            commands::codex::list_codex_recycled_accounts,
+            commands::codex::export_codex_recycled_accounts,
+            commands::codex::restore_codex_recycled_account,
+            commands::codex::delete_codex_recycled_account,
+            commands::codex::empty_codex_recycle_bin,
             commands::codex::delete_codex_account,
             commands::codex::delete_codex_accounts,
             commands::codex::start_codex_batch_delete,
@@ -1024,7 +1063,7 @@ pub fn run() {
             commands::codex::import_codex_from_local,
             commands::codex::start_codex_temp_login,
             commands::codex::cancel_codex_temp_login,
-            commands::codex::open_codex_temp_login_auth_url,
+            commands::codex::retry_codex_temp_login_import,
             commands::codex::cleanup_codex_temp_login_artifacts,
             commands::codex::import_codex_from_json,
             commands::codex::export_codex_accounts,
@@ -1051,6 +1090,46 @@ pub fn run() {
             commands::codex::add_codex_account_with_api_key,
             commands::codex::add_codex_account_from_grok,
             commands::codex::update_codex_account_name,
+            commands::codex::update_codex_account_egress_proxy,
+            commands::codex::test_codex_account_egress_proxy,
+            commands::codex::cancel_codex_account_egress_proxy,
+            commands::codex::get_codex_account_proxy_status,
+            commands::codex::measure_codex_account_proxy_latency,
+            commands::codex::restore_codex_account_proxy_entry,
+            commands::codex_proxy_catalog::codex_proxy_catalog_list,
+            commands::codex_proxy_catalog::codex_proxy_catalog_reorder,
+            commands::codex_proxy_catalog::codex_proxy_catalog_import,
+            commands::codex_proxy_catalog::codex_proxy_catalog_preview,
+            commands::codex_proxy_catalog::codex_proxy_catalog_network,
+            commands::codex_proxy_catalog::codex_proxy_catalog_insecure,
+            commands::codex_proxy_catalog::codex_proxy_catalog_group_insecure,
+            commands::codex_proxy_catalog::codex_proxy_catalog_rename,
+            commands::codex_proxy_catalog::codex_proxy_catalog_latency,
+            commands::codex_proxy_catalog::codex_proxy_catalog_refresh,
+            commands::codex_proxy_catalog::codex_proxy_catalog_cancel,
+            commands::codex_proxy_catalog::codex_proxy_catalog_dependencies,
+            commands::codex_proxy_catalog::codex_proxy_catalog_remove,
+            commands::codex_proxy_catalog::codex_proxy_catalog_set_auto_update,
+            commands::codex_proxy_catalog::codex_proxy_catalog_set_default,
+            commands::codex_proxy_catalog::codex_proxy_catalog_clear_default,
+            commands::codex_proxy_catalog::codex_proxy_catalog_bind,
+            commands::codex_proxy_catalog::codex_proxy_catalog_probe,
+            commands::codex_proxy_catalog::codex_proxy_strategy_save,
+            commands::codex_proxy_catalog::codex_proxy_strategy_remove,
+            commands::codex_proxy_engine::codex_proxy_engine_status,
+            commands::codex_proxy_engine::codex_proxy_engine_preflight,
+            commands::codex_proxy_engine::codex_proxy_instance_preflight,
+            commands::codex_proxy_engine::codex_proxy_activity_snapshot,
+            commands::codex_proxy_engine::codex_proxy_activity_summary,
+            commands::codex_proxy_engine::codex_proxy_activity_set_enabled,
+            commands::codex_proxy_engine::codex_proxy_activity_clear,
+            commands::codex_client_proxy::codex_proxy_target_get,
+            commands::codex_unified_proxy::codex_unified_proxy_get,
+            commands::codex_unified_proxy::codex_unified_proxy_preview,
+            commands::codex_unified_proxy::codex_unified_proxy_apply,
+            commands::codex_unified_proxy::codex_unified_proxy_disable,
+            commands::codex_proxy_engine::codex_proxy_engine_install,
+            commands::codex_proxy_engine::codex_proxy_engine_cancel,
             commands::codex::update_codex_api_key_credentials,
             commands::codex::sync_codex_api_key_provider_accounts,
             commands::codex::update_codex_api_key_bound_oauth_account,
@@ -1072,6 +1151,8 @@ pub fn run() {
             commands::codex::codex_wakeup_cancel_scope,
             commands::codex::codex_wakeup_release_scope,
             commands::codex::codex_wakeup_test,
+            commands::codex::codex_wakeup_pending_confirmations,
+            commands::codex::codex_wakeup_respond_confirmation,
             commands::codex::codex_wakeup_run_task,
             commands::codex::codex_wakeup_run_enabled_tasks,
             commands::codex::load_codex_account_groups,
@@ -1082,8 +1163,17 @@ pub fn run() {
             commands::codex::codex_model_provider_chat_test_batch,
             commands::codex::codex_cancel_model_provider_chat_test,
             commands::codex::codex_list_model_provider_models,
+            commands::codex::get_codex_model_reasoning_efforts,
+            commands::codex::preview_codex_model_config_import,
+            commands::codex::import_codex_model_config,
+            commands::codex::export_codex_model_config,
             commands::codex::codex_query_model_provider_usage,
             commands::codex::codex_local_access_get_state,
+            commands::codex::codex_local_access_get_request_detail,
+            commands::codex::codex_local_access_get_request_payload_logging,
+            commands::codex::codex_local_access_get_request_payload_logging_status,
+            commands::codex::codex_local_access_update_request_payload_logging,
+            commands::codex::codex_local_access_clear_request_payloads,
             commands::codex::codex_list_instance_gateways,
             commands::codex::codex_stop_instance_gateway,
             commands::codex::codex_restart_instance_gateway,
@@ -1091,12 +1181,14 @@ pub fn run() {
             commands::codex::codex_local_access_append_accounts,
             commands::codex::codex_local_access_remove_account,
             commands::codex::codex_local_access_recover_accounts,
+            commands::codex::codex_local_access_clear_pool_failure,
             commands::codex::codex_local_access_rotate_api_key,
             commands::codex::codex_local_access_update_bound_oauth_account,
             commands::codex::codex_local_access_clear_stats,
             commands::codex::codex_local_access_query_stats,
             commands::codex::codex_local_access_query_account_window_stats,
             commands::codex::codex_local_access_query_request_logs,
+            commands::codex::codex_account_proxy_recent_requests,
             commands::codex::codex_local_access_prepare_restart,
             commands::codex::codex_local_access_restart_sidecar,
             commands::codex::codex_local_access_kill_port,
@@ -1114,6 +1206,9 @@ pub fn run() {
             commands::codex::codex_local_access_update_gateway_mode,
             commands::codex::codex_local_access_update_debug_logs,
             commands::codex::codex_local_access_update_image_generation_model,
+            commands::codex::codex_local_access_update_image_generation_model_catalog,
+            commands::codex::codex_local_access_update_image_generation_main_model,
+            commands::codex::codex_local_access_update_image_generation_accounts,
             commands::codex::codex_local_access_update_access_scope,
             commands::codex::codex_local_access_update_client_base_url_host,
             commands::codex::codex_local_access_create_api_key,
@@ -1501,6 +1596,7 @@ pub fn run() {
             commands::codex_instance::codex_preview_session_export,
             commands::codex_instance::codex_export_sessions,
             commands::codex_instance::codex_preview_session_import,
+            commands::codex_instance::codex_validate_session_import_paths,
             commands::codex_instance::codex_import_sessions,
             commands::codex_instance::codex_open_session_location,
             commands::codex_instance::codex_open_session_rollout,
@@ -1518,6 +1614,8 @@ pub fn run() {
             commands::codex_instance::codex_execute_instance_launch_command,
             // Instance Commands
             commands::instance::get_instance_defaults,
+            commands::instance_storage_cleanup::scan_orphan_instance_dirs,
+            commands::instance_storage_cleanup::delete_orphan_instance_dirs,
             commands::instance::list_instances,
             commands::instance::create_instance,
             commands::instance::update_instance,
@@ -1549,13 +1647,47 @@ pub fn run() {
                     modules::logger::log_info("[Window] 主窗口已销毁，应用继续在托盘运行");
                 } else {
                     let first_shutdown = modules::app_lifecycle::begin_shutdown();
+                    let wait_for_native =
+                        first_shutdown && modules::codex_local_access::native_api_running();
+                    if wait_for_native {
+                        api.prevent_exit();
+                        // An async timeout cannot preempt a synchronous filesystem/process probe.
+                        let watchdog_app = app_handle.clone();
+                        if let Err(error) = std::thread::Builder::new()
+                            .name("native-api-exit-watchdog".into())
+                            .spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_secs(20));
+                                watchdog_app.exit(0);
+                            })
+                        {
+                            modules::logger::log_warn(&format!(
+                                "Unable to start API exit watchdog: {error}"
+                            ));
+                            app_handle.exit(0);
+                        }
+                    }
                     if first_shutdown {
                         commands::codex_instance::restore_mixed_model_profiles_for_app_exit();
                     }
                     modules::codex_app_injection::stop_all();
-                    tauri::async_runtime::spawn(async {
-                        modules::codex_local_access::shutdown_local_access_gateway_for_app_exit()
-                            .await;
+                    modules::codex_proxy_engine::shutdown_all();
+                    let app_to_exit = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            modules::codex_local_access::shutdown_local_access_gateway_for_app_exit(
+                            ),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            modules::logger::log_warn(
+                                "API service shutdown exceeded the exit deadline",
+                            );
+                        }
+                        if wait_for_native {
+                            app_to_exit.exit(0);
+                        }
                     });
                 }
             }
@@ -1565,6 +1697,7 @@ pub fn run() {
                     commands::codex_instance::restore_mixed_model_profiles_for_app_exit();
                 }
                 modules::codex_app_injection::stop_all();
+                modules::codex_proxy_engine::shutdown_all();
                 tauri::async_runtime::spawn(async {
                     modules::codex_local_access::shutdown_local_access_gateway_for_app_exit().await;
                 });

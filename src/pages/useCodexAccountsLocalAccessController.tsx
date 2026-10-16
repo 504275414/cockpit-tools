@@ -1,10 +1,12 @@
+import { getCodexAccountQuotaError } from "../utils/codexProxyRuntimeError";
+import { summarizeCodexInstanceGateways } from "../utils/codexInstanceGatewaySummary";
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { RefreshCw, X, CircleAlert, Info, Link2 } from "lucide-react";
 import * as codexService from "../services/codexService";
 import * as codexLocalAccessService from "../services/codexLocalAccessService";
 import { presentWindowsOperationError } from "../utils/windowsOperationDialog";
-import { assignAccountsToCodexGroup, deleteCodexGroup, removeAccountsFromCodexGroup } from "../services/codexAccountGroupService";
+import { setCodexGroupAccounts, deleteCodexGroup, removeAccountsFromCodexGroup } from "../services/codexAccountGroupService";
 import { formatCodexLoginProvider, getCodexAuthMetadata, getCodexPlanFilterKey, getCodexSubscriptionPresentationForAccount, isCodexApiKeyAccount, isCodexNewApiAccount, isCodexTeamLikePlan, type CodexQuotaErrorInfo } from "../types/codex";
 import { canAddCodexAccountToLocalAccess, filterCodexLocalAccessAccountIds } from "../utils/codexLocalAccessAccounts";
 import { extractCodexQuotaErrorCode, extractCodexQuotaErrorStatusCode, isBlockingCodexAccountQuotaError, isVerboseCodexQuotaErrorMessage, summarizeCodexQuotaErrorMessage } from "../utils/codexQuotaError";
@@ -14,6 +16,10 @@ import { CODEX_PLAN_BADGE_STYLE_CHANGED_EVENT, getCodexPlanBadgeStyle, type Code
 import { invoke } from "@tauri-apps/api/core";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 import { DEFAULT_CODEX_INSTANCE_ID } from "../components/codex/CodexLaunchPreviewModal";
+import {
+  CODEX_LAUNCH_PREVIEW_API_SERVICE_CARD_KEY,
+  persistCodexLaunchPreviewLastInstanceId,
+} from "../utils/codexLaunchPreviewInstancePreference";
 import type { MultiSelectFilterOption } from "../components/MultiSelectFilterDropdown";
 import type { SingleSelectFilterOption } from "../components/SingleSelectFilterDropdown";
 import type { CodexAccount } from "../types/codex";
@@ -70,7 +76,6 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
   | "quotaErrorDetail"
   | "reloadCodexGroups"
   | "reloadLocalAccessState"
-  | "requestLocalAccessRiskNotice"
   | "searchQuery"
   | "selected"
   | "setActiveGroupId"
@@ -147,7 +152,6 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
     quotaErrorDetail,
     reloadCodexGroups,
     reloadLocalAccessState,
-    requestLocalAccessRiskNotice,
     searchQuery,
     selected,
     setActiveGroupId,
@@ -195,6 +199,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
   const [instanceGatewaysError, setInstanceGatewaysError] = useState("");
   const resolveQuotaErrorMeta = useCallback(
       (quotaError?: CodexQuotaErrorInfo) => {
+        quotaError = getCodexAccountQuotaError(quotaError);
         if (!quotaError?.message) {
           return {
             statusCode: "",
@@ -368,9 +373,9 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
                 type="button"
                 className="btn btn-sm btn-outline quota-error-action"
                 onClick={onReauthorize}
-                title={t("common.shared.addModal.oauth", "OAuth 授权")}
+                title={t("common.reauthorize", "重新授权")}
               >
-                {t("common.shared.addModal.oauth", "OAuth 授权")}
+                {t("common.reauthorize", "重新授权")}
               </button>
             )}
           </div>
@@ -714,6 +719,12 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
             health,
           ]),
         );
+        // 手动恢复后仍在抑制窗口内的账号：与账号状态弹框一致，暂时不计入异常。
+        const suppressedAccountIds = new Set(
+          (localAccessState?.recoverySuppressedAccountIds ?? [])
+            .map((accountId) => accountId.trim())
+            .filter(Boolean),
+        );
         const poolUnavailableAccountIds = new Set<string>();
         (localAccessState?.accountPoolHealth ?? []).forEach((pool) => {
           const statuses = (pool.accountStatuses ?? []).filter((member) =>
@@ -742,6 +753,10 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
         };
   
         (localAccessCollection?.accountIds ?? []).forEach((accountId) => {
+          if (suppressedAccountIds.has(accountId)) {
+            summary.available += 1;
+            return;
+          }
           const account = accountById.get(accountId);
           const health = healthById.get(accountId);
           if (!account) {
@@ -776,6 +791,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
         localAccessCollection?.accountIds,
         localAccessState?.accountHealth,
         localAccessState?.accountPoolHealth,
+        localAccessState?.recoverySuppressedAccountIds,
       ]);
     const localAccessAccountPoolHealthHasIssue =
       localAccessAccountPoolHealthSummary.available <
@@ -985,13 +1001,10 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
       void refreshInstanceGateways();
     }, [refreshInstanceGateways]);
 
-    const instanceGatewaySummary = useMemo(() => {
-      const total = instanceGateways.length;
-      const running = instanceGateways.filter(
-        (gateway) => gateway.status === "running",
-      ).length;
-      return { total, running, issues: Math.max(0, total - running) };
-    }, [instanceGateways]);
+    const instanceGatewaySummary = useMemo(
+      () => summarizeCodexInstanceGateways(instanceGateways),
+      [instanceGateways],
+    );
   
     const openCodexApiServicePage = useCallback(() => {
       setShowLocalAccessModal(false);
@@ -1144,7 +1157,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
           setAddingLocalAccessAccountId(null);
         }
       },
-      [addingLocalAccessAccountId, ensureLocalAccessEntryVisible, setMessage, t],
+      [accounts, addingLocalAccessAccountId, ensureLocalAccessEntryVisible, setMessage, t],
     );
   
     const handleRemoveLocalAccessAccount = useCallback(
@@ -1559,8 +1572,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
   
     const handleQuickAddAccountsToGroup = useCallback(
       async (groupId: string, accountIds: string[]) => {
-        if (accountIds.length === 0) return;
-        await assignAccountsToCodexGroup(groupId, accountIds);
+        await setCodexGroupAccounts(groupId, accountIds);
         await reloadCodexGroups();
       },
       [reloadCodexGroups],
@@ -1819,11 +1831,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
     );
   
     const handleToggleLocalAccessEnabled = useCallback(async () => {
-      if (!localAccessCollection) return;
-      if (!localAccessCollection.enabled) {
-        const confirmed = await requestLocalAccessRiskNotice("service");
-        if (!confirmed) return;
-      }
+      if (!localAccessCollection) return false;
       setLocalAccessSaving(true);
       try {
         const nextState =
@@ -1843,7 +1851,7 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
       } finally {
         setLocalAccessSaving(false);
       }
-    }, [localAccessCollection, requestLocalAccessRiskNotice, setMessage, t]);
+    }, [localAccessCollection, setMessage, t]);
   
     const handleActivateLocalAccess = useCallback(
       async (options?: {
@@ -1876,8 +1884,6 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
           );
           if (!confirmedEnableAndSwitch) return;
         }
-        const confirmed = await requestLocalAccessRiskNotice("service");
-        if (!confirmed) return;
         const flowStartedAt = performance.now();
         console.info("[Codex API Service Switch][UI] button loading started");
         setLocalAccessStarting(true);
@@ -1907,7 +1913,6 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
       [
         fetchCurrentAccount,
         localAccessCollection,
-        requestLocalAccessRiskNotice,
         setMessage,
         t,
       ],
@@ -1941,6 +1946,10 @@ export function useCodexAccountsLocalAccessController(context: Pick<ReturnType<t
   
     const handleExecuteLocalAccessLaunchPreview =
       useCallback(async (): Promise<boolean> => {
+        persistCodexLaunchPreviewLastInstanceId(
+          CODEX_LAUNCH_PREVIEW_API_SERVICE_CARD_KEY,
+          launchPreviewInstanceId,
+        );
         const activateSelectedTarget = async () => {
           if (launchPreviewInstanceId !== DEFAULT_CODEX_INSTANCE_ID) {
             await codexInstanceStore.updateInstance({

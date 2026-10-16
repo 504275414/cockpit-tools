@@ -4,31 +4,100 @@
 include!("codex_local_access_foundation.rs");
 include!("codex_local_access_quota_cooldown.rs");
 include!("codex_local_access_request_transform.rs");
+include!("codex_local_access_historical_pricing.rs");
 include!("codex_local_access_routing_pricing.rs");
 include!("codex_local_access_request_logs.rs");
+include!("codex_local_access_request_diagnostics.rs");
+include!("codex_local_access_request_diagnostics_poll.rs");
 include!("codex_local_access_profile_takeover.rs");
+include!("codex_local_access_takeover_maintenance.rs");
 include!("codex_local_access_sidecar_config.rs");
 include!("codex_local_access_automatic_routing.rs");
 include!("codex_local_access_sidecar_runtime.rs");
+include!("codex_local_access_pool_diagnostics.rs");
 include!("codex_local_access_collection.rs");
+include!("codex_local_access_image_sources.rs");
+include!("codex_local_access_image_model_catalog.rs");
+include!("codex_local_access_model_config_transfer.rs");
+include!("codex_local_access_account_references.rs");
+include!("codex_local_access_key_recovery.rs");
+include!("codex_local_access_sidecar_retirement.rs");
 include!("codex_local_access_gateway_runtime.rs");
+include!("codex_local_access_native.rs");
+include!("codex_local_access_native_usage.rs");
+include!("codex_local_access_native_catalog.rs");
+include!("codex_local_access_continuity.rs");
+include!("codex_local_access_sidecar_continuity.rs");
+include!("codex_local_access_native_transport.rs");
+include!("codex_local_access_direct_identity.rs");
+include!("codex_local_access_native_routes.rs");
+include!("codex_local_access_native_images.rs");
+include!("codex_local_access_native_diagnostics.rs");
+include!("codex_local_access_native_profiles.rs");
+include!("codex_local_access_service_tier_control.rs");
 include!("codex_local_access_provider_gateway.rs");
+include!("codex_local_access_provider_lifecycle.rs");
+include!("codex_local_access_provider_auth_sync.rs");
 include!("codex_local_access_instance_gateways.rs");
 include!("codex_local_access_probe_chat.rs");
 include!("codex_pelican_transport.rs");
+include!("codex_pelican_provider_transport.rs");
 include!("codex_local_access_commands.rs");
 include!("codex_local_access_http.rs");
 // The retired in-process WebSocket gateway is retained only as a test oracle.
-// Production traffic is handled by the bundled CLIProxyAPI sidecar.
+// Production traffic is handled by the native engine or the optional CLIProxyAPI sidecar.
 #[cfg(test)]
 include!("codex_local_access_recovery.rs");
 
 #[cfg(test)]
+#[path = "codex_local_access_gateway_default_tests.rs"]
+mod gateway_default_tests;
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn deepseek_multi_agent_survives_profile_template_override() {
+        let mut catalog = serde_json::json!({"models": [{"slug": "deepseek-flash"}]});
+        let definitions = vec![super::ProfileModelDefinition {
+            model_id: "deepseek-flash".into(),
+            display_name: "DeepSeek-V4.1-Flash".into(),
+            template: Some(serde_json::json!({"multi_agent_version": null,
+                "supported_reasoning_levels": [{"effort": "max"}]})),
+            image_capable: true,
+        }];
+        super::apply_profile_model_definition_overrides(&mut catalog, &definitions);
+        assert_eq!(catalog["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(catalog["models"][0]["supported_reasoning_levels"][0]["effort"], "max");
+        assert_eq!(catalog["models"][0]["input_modalities"], serde_json::json!(["text", "image"]));
+    }
     include!("codex_local_access_tests_automatic_routing.rs");
     include!("codex_local_access_tests_sidecar_gateway.rs");
+    include!("codex_local_access_tests_shared_api_identity.rs");
+    include!("codex_local_access_tests_pool_failure_dismissal.rs");
+    include!("codex_local_access_tests_proxy.rs");
+    include!("codex_local_access_tests_provider_auth_sync.rs");
+    include!("codex_local_access_tests_grok_lifecycle.rs");
     include!("codex_local_access_tests_pricing_profile.rs");
+    include!("codex_local_access_tests_long_price_override.rs");
     include!("codex_local_access_tests_request_routing.rs");
+    include!("codex_local_access_tests_provider_gateway_vision.rs");
+    include!("codex_local_access_tests_mixed_gateway_scope.rs");
     include!("codex_local_access_tests_takeover.rs");
+    include!("codex_local_access_tests_takeover_maintenance.rs");
     include!("codex_local_access_tests_internal_service.rs");
+    include!("codex_local_access_tests_provider_admission.rs");
+    include!("codex_local_access_tests_image_main_model.rs");
+    include!("codex_local_access_tests_image_sources.rs");
+    include!("codex_local_access_tests_image_model_catalog.rs");
+    include!("codex_local_access_tests_inbound_key_recovery.rs");
+    include!("codex_local_access_tests_key_recovery.rs");
+    include!("codex_local_access_tests_service_transitions.rs");
+    include!("codex_local_access_tests_timeout_config.rs");
+    include!("codex_local_access_tests_provider_activation.rs");
+    include!("codex_local_access_tests_account_references.rs");
+    include!("codex_local_access_tests_request_diagnostics.rs");
+    include!("codex_local_access_tests_output_speed.rs");
+    include!("codex_local_access_tests_service_tier_evidence.rs");
+    include!("codex_local_access_tests_service_tier_control.rs");
+    include!("codex_local_access_tests_request_diagnostics_poll.rs");
 }

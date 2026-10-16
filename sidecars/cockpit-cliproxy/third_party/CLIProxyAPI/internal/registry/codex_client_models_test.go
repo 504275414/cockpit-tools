@@ -28,15 +28,15 @@ func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {
 }
 
 func TestValidateCodexClientModelsJSON(t *testing.T) {
-	validDefault := testCodexClientModel("gpt-5.5", 1)
-	validOther := testCodexClientModel("gpt-5.6-sol", 2)
-	emptySlug := testCodexClientModel("gpt-5.5", 1)
+	validDefault := testCodexClientModel("gpt-5.6-sol", 1)
+	validOther := testCodexClientModel("gpt-5.6-luna", 2)
+	emptySlug := testCodexClientModel("gpt-5.6-sol", 1)
 	emptySlug["slug"] = ""
-	missingField := testCodexClientModel("gpt-5.5", 1)
+	missingField := testCodexClientModel("gpt-5.6-sol", 1)
 	delete(missingField, "base_instructions")
-	wrongFieldType := testCodexClientModel("gpt-5.5", 1)
+	wrongFieldType := testCodexClientModel("gpt-5.6-sol", 1)
 	wrongFieldType["context_window"] = "372000"
-	unsupportedDefault := testCodexClientModel("gpt-5.5", 1)
+	unsupportedDefault := testCodexClientModel("gpt-5.6-sol", 1)
 	unsupportedDefault["default_reasoning_level"] = "high"
 
 	tests := []struct {
@@ -66,9 +66,9 @@ func TestValidateCodexClientModelsJSON(t *testing.T) {
 	}
 }
 
-func TestMergeLocallyPinnedCodexClientModelsKeepsAstraWhenRemoteLags(t *testing.T) {
+func TestMergeLocallyPinnedCodexClientModelsKeepsPinnedModelsWhenRemoteLags(t *testing.T) {
 	remotePayload := map[string]any{
-		"models":          []map[string]any{testCodexClientModel("gpt-5.5", 1)},
+		"models":          []map[string]any{testCodexClientModel("gpt-5.6-sol", 1)},
 		"model_overrides": []map[string]any{{"slug": "custom-override"}},
 	}
 	remote, err := json.Marshal(remotePayload)
@@ -77,7 +77,7 @@ func TestMergeLocallyPinnedCodexClientModelsKeepsAstraWhenRemoteLags(t *testing.
 	}
 	merged, err := mergeLocallyPinnedCodexClientModels(remote)
 	if err != nil {
-		t.Fatalf("merge remote catalog without Astra: %v", err)
+		t.Fatalf("merge remote catalog without pinned models: %v", err)
 	}
 
 	var payload codexClientModelsPayload
@@ -91,54 +91,96 @@ func TestMergeLocallyPinnedCodexClientModelsKeepsAstraWhenRemoteLags(t *testing.
 	if _, ok := mergedDocument["model_overrides"]; !ok {
 		t.Fatal("merge dropped remote model_overrides")
 	}
-	var astra map[string]any
+
+	countBySlug := make(map[string]int, len(payload.Models))
+	modelBySlug := make(map[string]map[string]any, len(payload.Models))
 	for _, model := range payload.Models {
-		if model["slug"] == locallyPinnedCodexClientModelSlug {
-			astra = model
+		slug, _ := model["slug"].(string)
+		countBySlug[slug]++
+		modelBySlug[slug] = model
+	}
+	for _, pinnedSlug := range locallyPinnedCodexClientModelSlugs {
+		if countBySlug[pinnedSlug] != 1 {
+			t.Fatalf("merged catalog %s entry count = %d, want 1 (models: %#v)", pinnedSlug, countBySlug[pinnedSlug], countBySlug)
+		}
+		// The shipped catalog is the only source here, so every pinned model
+		// must carry the embedded metadata rather than the remote stub.
+		window, compact := float64(256000), float64(230400)
+		if pinnedSlug == codexBuiltinGPT61SolModelID {
+			window, compact = 272000, 244800
+		}
+		if got := modelBySlug[pinnedSlug]["context_window"]; got != window {
+			t.Fatalf("%s context_window = %#v, want %v", pinnedSlug, got, window)
+		}
+		// Every declared window must include its 90% compaction limit.
+		if got := modelBySlug[pinnedSlug]["auto_compact_token_limit"]; got != compact {
+			t.Fatalf("%s auto_compact_token_limit = %#v, want %v", pinnedSlug, got, compact)
 		}
 	}
-	if astra == nil {
-		t.Fatal("merged catalog does not contain locally pinned Astra")
-	}
-	if astra["context_window"] != float64(1050000) {
-		t.Fatalf("Astra context_window = %#v, want 1050000", astra["context_window"])
+	if len(payload.Models) != 1+len(locallyPinnedCodexClientModelSlugs) {
+		t.Fatalf("merged catalog model count = %d, want %d", len(payload.Models), 1+len(locallyPinnedCodexClientModelSlugs))
 	}
 }
 
-func TestMergeLocallyPinnedCodexClientModelsPrefersRemoteAstraMetadata(t *testing.T) {
-	remoteAstra := testCodexClientModel(locallyPinnedCodexClientModelSlug, 4)
+func TestMergeLocallyPinnedCodexClientModelsPrefersRemotePinnedMetadata(t *testing.T) {
+	remoteAstra := testCodexClientModel(codexBuiltinGPT6AstraModelID, 4)
 	remoteAstra["display_name"] = "Remote Astra"
+	remoteSol := testCodexClientModel(codexBuiltinGPT6SolModelID, 5)
+	remoteSol["display_name"] = "Remote Sol"
 	remote := testCodexClientCatalog(
 		t,
-		testCodexClientModel("gpt-5.5", 1),
+		testCodexClientModel("gpt-5.6-sol", 1),
 		remoteAstra,
+		remoteSol,
 	)
 	merged, err := mergeLocallyPinnedCodexClientModels(remote)
 	if err != nil {
-		t.Fatalf("merge remote catalog with Astra: %v", err)
+		t.Fatalf("merge remote catalog with partially pinned models: %v", err)
 	}
 
 	var payload codexClientModelsPayload
 	if err := json.Unmarshal(merged, &payload); err != nil {
 		t.Fatalf("decode merged catalog: %v", err)
 	}
-	count := 0
+	countBySlug := make(map[string]int, len(payload.Models))
+	modelBySlug := make(map[string]map[string]any, len(payload.Models))
 	for _, model := range payload.Models {
-		if model["slug"] == locallyPinnedCodexClientModelSlug {
-			count++
-			if model["display_name"] != "Remote Astra" {
-				t.Fatalf("remote Astra metadata was not preserved: %#v", model)
-			}
+		slug, _ := model["slug"].(string)
+		countBySlug[slug]++
+		modelBySlug[slug] = model
+	}
+	for _, tc := range []struct {
+		slug        string
+		displayName string
+	}{
+		{slug: codexBuiltinGPT6AstraModelID, displayName: "Remote Astra"},
+		{slug: codexBuiltinGPT6SolModelID, displayName: "Remote Sol"},
+	} {
+		if countBySlug[tc.slug] != 1 {
+			t.Fatalf("merged catalog %s entry count = %d, want 1", tc.slug, countBySlug[tc.slug])
+		}
+		model := modelBySlug[tc.slug]
+		if model["display_name"] != tc.displayName {
+			t.Fatalf("remote %s metadata was not preserved: %#v", tc.slug, model)
+		}
+		if got := model["context_window"]; got != float64(372000) {
+			t.Fatalf("remote %s context_window = %#v, want 372000", tc.slug, got)
 		}
 	}
-	if count != 1 {
-		t.Fatalf("Astra entry count = %d, want 1", count)
+	if countBySlug[codexBuiltinGPT61SolModelID] != 1 || modelBySlug[codexBuiltinGPT61SolModelID]["context_window"] != float64(272000) {
+		t.Fatal("missing GPT-6.1 Sol must be backfilled exactly once from the embedded catalog")
+	}
+	if countBySlug[codexBuiltinGPT6LunaModelID] != 1 {
+		t.Fatalf("merged catalog %s entry count = %d, want 1", codexBuiltinGPT6LunaModelID, countBySlug[codexBuiltinGPT6LunaModelID])
+	}
+	if got := modelBySlug[codexBuiltinGPT6LunaModelID]["context_window"]; got != float64(256000) {
+		t.Fatalf("missing %s was not backfilled from the embedded catalog: %#v", codexBuiltinGPT6LunaModelID, modelBySlug[codexBuiltinGPT6LunaModelID])
 	}
 }
 
-func TestRefreshCodexClientModelsKeepsPinnedAstraOnValidRemoteCatalog(t *testing.T) {
+func TestRefreshCodexClientModelsKeepsPinnedModelsOnValidRemoteCatalog(t *testing.T) {
 	original, _ := GetCodexClientModelsSnapshot()
-	validCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	validCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.6-sol", 1))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(validCatalog)
@@ -154,21 +196,21 @@ func TestRefreshCodexClientModelsKeepsPinnedAstraOnValidRemoteCatalog(t *testing
 		}
 	})
 
-	tryRefreshCodexClientModels(context.Background(), "test pinned Astra refresh")
+	tryRefreshCodexClientModels(context.Background(), "test pinned model refresh")
 	data, _ := GetCodexClientModelsSnapshot()
 	var payload codexClientModelsPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("decode refreshed catalog: %v", err)
 	}
-	found := false
+	foundBySlug := make(map[string]int, len(locallyPinnedCodexClientModelSlugs))
 	for _, model := range payload.Models {
-		if model["slug"] == locallyPinnedCodexClientModelSlug {
-			found = true
-			break
-		}
+		slug, _ := model["slug"].(string)
+		foundBySlug[slug]++
 	}
-	if !found {
-		t.Fatal("valid remote refresh removed locally pinned Astra")
+	for _, pinnedSlug := range locallyPinnedCodexClientModelSlugs {
+		if foundBySlug[pinnedSlug] != 1 {
+			t.Fatalf("valid remote refresh left %s entry count = %d, want 1", pinnedSlug, foundBySlug[pinnedSlug])
+		}
 	}
 }
 
@@ -180,7 +222,7 @@ func TestLoadCodexClientModelsRejectsInvalidWithoutReplacing(t *testing.T) {
 		}
 	})
 
-	valid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	valid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.6-sol", 1))
 	changed, err := loadCodexClientModelsFromBytes(valid, "test")
 	if err != nil {
 		t.Fatalf("load valid catalog: %v", err)
@@ -209,7 +251,7 @@ func TestFetchCodexClientModelsFallsBackToNextURL(t *testing.T) {
 	}))
 	defer invalidServer.Close()
 
-	validCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	validCatalog := testCodexClientCatalog(t, testCodexClientModel("gpt-5.6-sol", 1))
 	validServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Errorf("method = %s, want GET", r.Method)
@@ -242,7 +284,7 @@ func TestRefreshCodexClientModelsKeepsLastValidSnapshot(t *testing.T) {
 		}
 	})
 
-	lastValid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.5", 1))
+	lastValid := testCodexClientCatalog(t, testCodexClientModel("gpt-5.6-sol", 1))
 	if _, err := loadCodexClientModelsFromBytes(lastValid, "test last valid"); err != nil {
 		t.Fatalf("load last valid catalog: %v", err)
 	}
@@ -254,7 +296,7 @@ func TestRefreshCodexClientModelsKeepsLastValidSnapshot(t *testing.T) {
 	}{
 		{name: "remote files missing", statusCode: http.StatusNotFound},
 		{name: "remote JSON malformed", statusCode: http.StatusOK, body: `{"models":`},
-		{name: "remote JSON incomplete", statusCode: http.StatusOK, body: `{"models":[{"slug":"gpt-5.5"}]}`},
+		{name: "remote JSON incomplete", statusCode: http.StatusOK, body: `{"models":[{"slug":"gpt-5.6-sol"}]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -311,4 +353,80 @@ func testCodexClientCatalog(t *testing.T, models ...map[string]any) []byte {
 		t.Fatalf("marshal test Codex client catalog: %v", err)
 	}
 	return data
+}
+
+func TestRemoteClientCatalogCannotRestoreRetiredModels(t *testing.T) {
+	var document map[string]any
+	if err := json.Unmarshal(embeddedCodexClientModelsJSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	models := document["models"].([]any)
+	document["models"] = append(models, testCodexClientModel("gpt-5.4", 20))
+	document["model_overrides"] = []any{testCodexClientModel("gpt-4.1", 21), testCodexClientModel("custom-model", 22)}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, err := mergeLocallyPinnedCodexClientModels(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCodexClientModelsJSON(merged); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(merged, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"models", "model_overrides"} {
+		for _, value := range document[key].([]any) {
+			slug := value.(map[string]any)["slug"].(string)
+			if isRetiredCodexModelID(slug) {
+				t.Fatalf("retired %s survived in %s", slug, key)
+			}
+		}
+	}
+	if len(document["model_overrides"].([]any)) != 1 {
+		t.Fatal("custom override was dropped")
+	}
+}
+
+func TestLoadCodexClientCatalogDropsRetiredModelsAndPreservesSolMetadata(t *testing.T) {
+	original, _ := GetCodexClientModelsSnapshot()
+	t.Cleanup(func() {
+		if _, err := loadCodexClientModelsFromBytes(original, "restore"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var document map[string]any
+	if err := json.Unmarshal(original, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["models"] = append(document["models"].([]any), testCodexClientModel("gpt-5.5", 100))
+	document["model_overrides"] = []any{testCodexClientModel("gpt-5.5", 100), testCodexClientModel("custom-model", 101)}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCodexClientModelsFromBytes(raw, "cached runtime catalog"); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(GetCodexClientModelsJSON(), &document); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range document["models"].([]any) {
+		model := entry.(map[string]any)
+		if isRetiredCodexModelID(model["slug"].(string)) {
+			t.Fatalf("runtime catalog restored retired model: %v", model["slug"])
+		}
+		if model["slug"] == "gpt-5.6-sol" {
+			count++
+			if model["display_name"] != "GPT-5.6 Sol" || model["max_context_window"] != float64(921000) {
+				t.Fatalf("active template metadata changed: %v", model)
+			}
+		}
+	}
+	if count != 1 || len(document["model_overrides"].([]any)) != 1 {
+		t.Fatalf("duplicate active model or invalid overrides: count=%d", count)
+	}
 }

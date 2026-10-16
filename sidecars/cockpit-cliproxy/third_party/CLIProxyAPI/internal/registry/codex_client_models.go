@@ -19,10 +19,17 @@ type codexClientModelsPayload struct {
 	Models []map[string]any `json:"models"`
 }
 
-const locallyPinnedCodexClientModelSlug = "gpt-6-astra"
+// locallyPinnedCodexClientModelSlugs lists the shipped Codex client models that
+// must stay in the catalog even when a remote registry lags behind.
+var locallyPinnedCodexClientModelSlugs = []string{
+	codexBuiltinGPT61SolModelID,
+	codexBuiltinGPT6AstraModelID,
+	codexBuiltinGPT6SolModelID,
+	codexBuiltinGPT6LunaModelID,
+}
 
-// mergeLocallyPinnedCodexClientModels keeps a shipped model available when a
-// remote registry has not learned it yet. Remote metadata wins once present.
+// mergeLocallyPinnedCodexClientModels keeps shipped models available when a
+// remote registry has not learned them yet. Remote metadata wins once present.
 func mergeLocallyPinnedCodexClientModels(data []byte) ([]byte, error) {
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(data, &document); err != nil {
@@ -36,28 +43,80 @@ func mergeLocallyPinnedCodexClientModels(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(modelsRaw, &models); err != nil {
 		return nil, fmt.Errorf("decode remote Codex client models: %w", err)
 	}
+
+	models, retiredRemoved, err := filterRetiredCodexClientModels(document, models)
+	if err != nil {
+		return nil, err
+	}
+	presentSlugs := make(map[string]struct{}, len(models))
 	for _, model := range models {
-		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(model["slug"])), locallyPinnedCodexClientModelSlug) {
-			return append([]byte(nil), data...), nil
+		presentSlugs[strings.ToLower(strings.TrimSpace(fmt.Sprint(model["slug"])))] = struct{}{}
+	}
+	missingSlugs := make([]string, 0, len(locallyPinnedCodexClientModelSlugs))
+	for _, slug := range locallyPinnedCodexClientModelSlugs {
+		if _, ok := presentSlugs[strings.ToLower(strings.TrimSpace(slug))]; !ok {
+			missingSlugs = append(missingSlugs, slug)
 		}
+	}
+	if len(missingSlugs) == 0 && !retiredRemoved {
+		return append([]byte(nil), data...), nil
 	}
 
 	var embedded codexClientModelsPayload
 	if err := json.Unmarshal(embeddedCodexClientModelsJSON, &embedded); err != nil {
 		return nil, fmt.Errorf("decode embedded Codex client model catalog: %w", err)
 	}
+	embeddedBySlug := make(map[string]map[string]any, len(embedded.Models))
 	for _, model := range embedded.Models {
-		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(model["slug"])), locallyPinnedCodexClientModelSlug) {
-			models = append(models, model)
-			mergedModels, err := json.Marshal(models)
-			if err != nil {
-				return nil, fmt.Errorf("encode merged Codex client models: %w", err)
-			}
-			document["models"] = mergedModels
-			return json.Marshal(document)
+		embeddedBySlug[strings.ToLower(strings.TrimSpace(fmt.Sprint(model["slug"])))] = model
+	}
+	for _, slug := range missingSlugs {
+		model, ok := embeddedBySlug[strings.ToLower(strings.TrimSpace(slug))]
+		if !ok {
+			return nil, fmt.Errorf("embedded Codex client catalog is missing locally pinned models %v", missingSlugs)
+		}
+		models = append(models, model)
+	}
+
+	mergedModels, err := json.Marshal(models)
+	if err != nil {
+		return nil, fmt.Errorf("encode merged Codex client models: %w", err)
+	}
+	document["models"] = mergedModels
+	return json.Marshal(document)
+}
+
+// filterRetiredCodexClientModels removes unavailable OAuth templates from both
+// the main catalog and its overrides without changing active model metadata.
+func filterRetiredCodexClientModels(document map[string]json.RawMessage, models []map[string]any) ([]map[string]any, bool, error) {
+	active := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		if !isRetiredCodexModelID(fmt.Sprint(model["slug"])) {
+			active = append(active, model)
 		}
 	}
-	return nil, fmt.Errorf("embedded Codex client catalog is missing locally pinned model %q", locallyPinnedCodexClientModelSlug)
+	retiredRemoved := len(active) != len(models)
+	models = active
+	if raw, exists := document["model_overrides"]; exists {
+		var overrides []map[string]any
+		if json.Unmarshal(raw, &overrides) == nil {
+			activeOverrides := make([]map[string]any, 0, len(overrides))
+			for _, model := range overrides {
+				if !isRetiredCodexModelID(fmt.Sprint(model["slug"])) {
+					activeOverrides = append(activeOverrides, model)
+				}
+			}
+			if len(activeOverrides) != len(overrides) {
+				retiredRemoved = true
+				encoded, err := json.Marshal(activeOverrides)
+				if err != nil {
+					return nil, false, fmt.Errorf("encode filtered model overrides: %w", err)
+				}
+				document["model_overrides"] = encoded
+			}
+		}
+	}
+	return models, retiredRemoved, nil
 }
 
 type codexClientModelsStore struct {
@@ -134,6 +193,29 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
 
+	var document map[string]json.RawMessage
+	var payload codexClientModelsPayload
+	if err := json.Unmarshal(data, &document); err != nil {
+		return false, fmt.Errorf("%s: decode Codex client catalog: %w", source, err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return false, fmt.Errorf("%s: decode Codex client models: %w", source, err)
+	}
+	models, changed, err := filterRetiredCodexClientModels(document, payload.Models)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", source, err)
+	}
+	if changed {
+		encoded, err := json.Marshal(models)
+		if err != nil {
+			return false, fmt.Errorf("%s: encode active Codex client models: %w", source, err)
+		}
+		document["models"] = encoded
+		data, err = json.Marshal(document)
+		if err != nil {
+			return false, fmt.Errorf("%s: encode active Codex client catalog: %w", source, err)
+		}
+	}
 	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
@@ -171,8 +253,8 @@ func ValidateCodexClientModelsJSON(data []byte) error {
 			return fmt.Errorf("Codex client model catalog model %q: %w", slug, err)
 		}
 	}
-	if _, ok := seen["gpt-5.5"]; !ok {
-		return fmt.Errorf("Codex client model catalog is missing default template %q", "gpt-5.5")
+	if _, ok := seen["gpt-5.6-sol"]; !ok {
+		return fmt.Errorf("Codex client model catalog is missing default template %q", "gpt-5.6-sol")
 	}
 	return nil
 }

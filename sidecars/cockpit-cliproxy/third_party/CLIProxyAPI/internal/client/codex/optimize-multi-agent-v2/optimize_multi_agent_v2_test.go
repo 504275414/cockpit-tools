@@ -70,7 +70,7 @@ func TestCodexSpawnAgentModelsFromSourcesIncludesModelMetadata(t *testing.T) {
 
 	catalog := []byte(`{"models":[
 		{"slug":"model-template","display_name":"Template","description":"Template model.","default_reasoning_level":"low","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"}],"service_tiers":[{"id":"priority"}],"priority":1},
-		{"slug":"gpt-5.5","display_name":"Default","description":"Default model.","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],"priority":2}
+		{"slug":"gpt-5.6-sol","display_name":"Default","description":"Default model.","default_reasoning_level":"medium","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}],"service_tiers":[{"id":"priority"}],"priority":2}
 	]}`)
 	available := []map[string]any{
 		{"id": "custom-model", "display_name": "Custom", "description": "Registry description."},
@@ -501,11 +501,14 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	if encrypted := gjson.GetBytes(got, "input.0.content.1.encrypted_content"); encrypted.Exists() {
 		t.Fatalf("content[1].encrypted_content was preserved: %s", got)
 	}
-	if author := gjson.GetBytes(got, "input.0.author").String(); author != "/root" {
-		t.Fatalf("author = %q, want /root", author)
+	for _, field := range []string{"author", "recipient", "id", "internal_chat_message_metadata_passthrough"} {
+		if gjson.GetBytes(got, "input.0."+field).Exists() {
+			t.Fatalf("private field %s must not reach standard Responses upstream: %s", field, got)
+		}
 	}
-	if turnID := gjson.GetBytes(got, "input.0.internal_chat_message_metadata_passthrough.turn_id").String(); turnID != "019f92ae-7eae-7371-957e-8f6f734edddc" {
-		t.Fatalf("turn_id = %q", turnID)
+	metadata := strings.TrimPrefix(gjson.GetBytes(got, "input.0.content.2.text").String(), "Agent routing metadata: ")
+	if gjson.Get(metadata, "author").String() != "/root" || gjson.Get(metadata, "internal_chat_message_metadata_passthrough.turn_id").String() != "019f92ae-7eae-7371-957e-8f6f734edddc" {
+		t.Fatalf("routing metadata lost: %s", metadata)
 	}
 }
 
@@ -1017,5 +1020,79 @@ func BenchmarkOptimizeCodexMultiAgentV2Request(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
+	}
+}
+
+func TestRestoreCodexCollaborationFlatToolNames(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		tool string
+	}{
+		{name: "double colon", tool: "collaboration::spawn_agent"},
+		{name: "dotted", tool: "collaboration.spawn_agent"},
+		{name: "double underscore", tool: "collaboration__spawn_agent"},
+		{name: "optimized double colon", tool: "collaboration-optimize::wait_agent"},
+		{name: "optimized dotted", tool: "collaboration-optimize.wait_agent"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"` + testCase.tool + `","arguments":"{}"}}`)
+			got := RestoreCodexCollaborationFlatToolNames(payload)
+			name := gjson.GetBytes(got, "item.name").String()
+			if name == "" || name == testCase.tool || strings.Contains(name, ":") || strings.Contains(name, ".") {
+				t.Fatalf("flat tool name was not normalized: %s", got)
+			}
+			if namespace := gjson.GetBytes(got, "item.namespace").String(); namespace != codexCollaborationNamespace {
+				t.Fatalf("namespace = %q, want %q; payload=%s", namespace, codexCollaborationNamespace, got)
+			}
+		})
+	}
+
+	plain := []byte(`{"type":"function_call","name":"exec_command","arguments":"{}"}`)
+	if got := RestoreCodexCollaborationFlatToolNames(plain); string(got) != string(plain) {
+		t.Fatalf("ordinary tool call mutated: %s", got)
+	}
+
+	structured := []byte(`{"type":"function_call","name":"spawn_agent","namespace":"collaboration","arguments":"{}"}`)
+	if got := RestoreCodexCollaborationFlatToolNames(structured); string(got) != string(structured) {
+		t.Fatalf("structured tool call mutated: %s", got)
+	}
+}
+
+func TestNormalizeCodexCollaborationArguments(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","name":"wait_agent","arguments":"{\"timeout_ms\":180000.0}"}}`)
+	got := NormalizeCodexCollaborationArguments(payload)
+	if args := gjson.GetBytes(got, "item.arguments").String(); args != `{"timeout_ms":180000}` {
+		t.Fatalf("arguments = %q, want integral timeout_ms; payload=%s", args, got)
+	}
+
+	nonIntegral := []byte(`{"type":"function_call","name":"wait_agent","arguments":"{\"timeout_ms\":1.5}"}`)
+	if out := NormalizeCodexCollaborationArguments(nonIntegral); string(out) != string(nonIntegral) {
+		t.Fatalf("non-integral float must stay unchanged: %s", out)
+	}
+
+	otherTool := []byte(`{"type":"function_call","name":"exec_command","arguments":"{\"timeout_ms\":180000.0}"}`)
+	if out := NormalizeCodexCollaborationArguments(otherTool); string(out) != string(otherTool) {
+		t.Fatalf("non-collaboration tool must stay unchanged: %s", out)
+	}
+}
+
+func TestUnknownSpawnAgentModelsKeepConservativeReasoning(t *testing.T) {
+	models := codexSpawnAgentModelsFromSources([]map[string]any{{"id": "vendor-unknown"}, {"id": "gpt-5.6-sol"}}, registry.GetCodexClientModelsJSON(), nil)
+	if len(models) != 2 {
+		t.Fatalf("spawn models = %d, want 2", len(models))
+	}
+	for _, model := range models {
+		if model.id == "vendor-unknown" {
+			if strings.Join(model.reasoningEfforts, ",") != "low,medium,high,xhigh" || model.defaultReasoningEffort != "medium" {
+				t.Fatalf("unknown inherited Sol reasoning: %+v", model)
+			}
+		} else if !strings.Contains(strings.Join(model.reasoningEfforts, ","), "ultra") || model.defaultReasoningEffort != "low" {
+			t.Fatalf("known Sol reasoning changed: %+v", model)
+		}
 	}
 }
