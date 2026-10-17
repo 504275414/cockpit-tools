@@ -461,6 +461,16 @@ npm run tauri build
 
 ---
 
+## 💬 交流群
+
+新建 Telegram 畅聊群：[点击加入](https://t.me/+Y8gMv4SlZUU2MWY1)
+
+微信（个人）：
+
+<img src="docs/images/wechat_info.jpg" alt="微信联系二维码" width="200" />
+
+---
+
 ## ☕ 赞助项目
 
 如果不介意，请 [☕ 赞赏支持一下](docs/DONATE.md)
