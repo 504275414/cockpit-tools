@@ -8,12 +8,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
-
-### Changed
-
-- Hide project community group invitations and contact QR codes from all README translations.
-
 ## [1.3.70] - 2026-10-16
 
 ### Fixed
