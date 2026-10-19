@@ -228,6 +228,7 @@
                 cooldown_account_count: Some(0),
                 plans: vec![QuotaPlanSummary {
                     plan: "PLUS".to_string(),
+                    official: false,
                     count: 14,
                     weekly_remaining_percent: Some(1387),
                     five_hour_remaining_percent: Some(100),

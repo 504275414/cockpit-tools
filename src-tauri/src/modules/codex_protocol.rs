@@ -2536,4 +2536,15 @@ mod tests {
             Some(0)
         );
     }
+
+    #[test]
+    fn official_ultrafast_catalog_only_advertises_supported_models() {
+        let catalog = build_codex_client_models_response(&managed_codex_model_ids());
+        for slug in ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"] {
+            let model = catalog["models"].as_array().unwrap().iter().find(|model| model["slug"] == slug).unwrap();
+            let expected = matches!(slug, "gpt-6.1-sol" | "gpt-6-astra");
+            assert_eq!(model["service_tiers"].as_array().unwrap().iter().any(|tier| tier["id"] == "ultrafast"), expected, "{slug}");
+            assert_eq!(model["additional_speed_tiers"].as_array().unwrap().iter().any(|tier| tier == "ultrafast"), expected, "{slug}");
+        }
+    }
 }

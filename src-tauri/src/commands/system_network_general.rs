@@ -398,7 +398,6 @@ pub fn get_general_config(app: tauri::AppHandle) -> Result<GeneralConfig, String
         hermes_auth_overwrite_on_switch: user_config.hermes_auth_overwrite_on_switch,
         codex_launch_on_switch: user_config.codex_launch_on_switch,
         codex_auto_restore_takeover_on_launch: user_config.codex_auto_restore_takeover_on_launch,
-        codex_preserve_verified_external_bridge: user_config.codex_preserve_verified_external_bridge,
         antigravity_launch_on_switch: user_config.antigravity_launch_on_switch,
         codex_restart_specified_app_on_switch: user_config.codex_restart_specified_app_on_switch,
         codex_local_access_entry_visible: user_config.codex_local_access_entry_visible,

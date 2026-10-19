@@ -28,8 +28,6 @@ export function SettingsCodexPlatformPanel(props: SettingsPageViewProps) {
     codexLaunchCandidates,
     codexLaunchOnSwitch,
     codexAutoRestoreTakeoverOnLaunch,
-    codexPreserveVerifiedExternalBridge,
-    setCodexPreserveVerifiedExternalBridge,
     setCodexAutoRestoreTakeoverOnLaunch,
     codexLocalAccessEntryVisible,
     codexQuotaAlertEnabled,
@@ -179,15 +177,7 @@ export function SettingsCodexPlatformPanel(props: SettingsPageViewProps) {
                 </div>
               </div>
 
-              <div className="settings-row">
-                <div className="row-label">
-                  <div className="row-title">{t('codex.autoRefreshScope.label')}</div>
-                  <div className="row-desc">{t('codex.autoRefreshScope.description')}</div>
-                </div>
-                <div className="row-control row-control--grow">
-                  <CodexRefreshPlanScopeControl value={codexAutoRefreshPlanTypes} onChange={setCodexAutoRefreshPlanTypes} />
-                </div>
-              </div>
+              <CodexRefreshPlanScopeControl value={codexAutoRefreshPlanTypes} onChange={setCodexAutoRefreshPlanTypes} />
               <CodexRequestPayloadSetting />
               {renderCurrentAccountRefreshRow('codex')}
               {renderAccountLevelRefreshConfig('codex')}
@@ -382,19 +372,6 @@ export function SettingsCodexPlatformPanel(props: SettingsPageViewProps) {
                 </div>
               </div>
 
-              <div className="settings-row">
-                <div className="row-label">
-                  <div className="row-title">{t('settings.general.codexPreserveExternalBridge')}</div>
-                  <div className="row-desc">{t('settings.general.codexPreserveExternalBridgeDesc')}</div>
-                </div>
-                <div className="row-control">
-                  <label className="switch">
-                    <input type="checkbox" checked={codexPreserveVerifiedExternalBridge}
-                      onChange={(event) => setCodexPreserveVerifiedExternalBridge(event.target.checked)} />
-                    <span className="slider"></span>
-                  </label>
-                </div>
-              </div>
 
               <div className="settings-row">
                 <div className="row-label">

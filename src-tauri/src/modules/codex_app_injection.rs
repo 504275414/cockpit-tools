@@ -894,6 +894,8 @@ fn local_quota_url(base_url: &str) -> Option<String> {
 #[serde(rename_all = "camelCase")]
 struct QuotaPlanSummary {
     plan: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    official: bool,
     count: i64,
     weekly_remaining_percent: Option<i64>,
     five_hour_remaining_percent: Option<i64>,
@@ -1659,6 +1661,7 @@ fn injection_script(
         serde_json::to_string(&i18n::translate(locale, "grok.quotaQuery.empty", &[]))
             .unwrap_or_else(|_| "\"No quota\"".to_string());
     let balance_lines = serde_json::to_string(balance_lines).unwrap_or_else(|_| "[]".to_string());
+    let official_label = serde_json::to_string(&i18n::translate(locale, "chatgptPlan.officialFlow.badge", &[])).unwrap_or_default();
     format!(
         r#"(() => {{
       const providerName = {provider};
@@ -1669,6 +1672,7 @@ fn injection_script(
       const abnormalAccountCount = {abnormal_account_count_value};
       const cooldownAccountCount = {cooldown_account_count_value};
       const plans = {plans};
+      const officialLabel = {official_label};
       const grokLines = {grok_lines_value};
       const grokBadgePercent = {grok_badge_percent};
       const grokBadgeProduct = {grok_badge_product};
@@ -1777,12 +1781,13 @@ fn injection_script(
           const weekly = formatPercent(plan.weeklyRemainingPercent);
           const fiveHour = formatPercent(plan.fiveHourRemainingPercent);
           const planKey = String(plan.plan || '').toUpperCase();
+          const planLabel = plan.official ? String(plan.plan || '') + ' ' + officialLabel : plan.plan;
           const planColor = planKey.includes('PLUS') ? '#8b5cf6' : (planKey.includes('TEAM') || planKey.includes('BUSINESS')) ? '#3b82f6' : planKey.includes('API_KEY') ? '#a3a3a3' : '#10b981';
           const metrics = [];
           if (Number.isFinite(plan.weeklyRemainingPercent)) metrics.push('<span style="display:inline-flex;align-items:center;gap:4px;"><i style="width:5px;height:5px;border-radius:999px;background:#10b981;"></i>' + escapeHtml(weeklyLabel) + ' ' + escapeHtml(weekly) + '</span>');
           if (Number.isFinite(plan.fiveHourRemainingPercent)) metrics.push('<span style="display:inline-flex;align-items:center;gap:4px;"><i style="width:5px;height:5px;border-radius:999px;background:#3b82f6;"></i>' + escapeHtml(fiveHourLabel) + ' ' + escapeHtml(fiveHour) + '</span>');
           const quotaHtml = metrics.length ? metrics.join('<span style="opacity:.35;">·</span>') : '<span style="opacity:.72;">' + escapeHtml(quotaEmptyLabel) + '</span>';
-          return '<div style="display:flex;align-items:center;justify-content:space-between;gap:9px;padding:6px 0;border-bottom:1px solid var(--color-token-border-subtle,rgba(127,127,127,.10));"><span style="display:inline-flex;align-items:center;gap:6px;color:var(--color-token-text-secondary,#737373);font-weight:500;white-space:nowrap;"><i style="width:6px;height:6px;border-radius:999px;background:' + planColor + ';box-shadow:0 0 0 2px rgba(127,127,127,.10);"></i>' + escapeHtml(plan.plan) + ' <small style="font:inherit;opacity:.62;">' + Math.max(0, Math.round(plan.count || 0)) + '</small></span><span style="display:inline-flex;align-items:center;gap:5px;color:var(--color-token-text-secondary,#737373);text-align:right;white-space:nowrap;">' + quotaHtml + '</span></div>';
+          return '<div style="display:flex;align-items:center;justify-content:space-between;gap:9px;padding:6px 0;border-bottom:1px solid var(--color-token-border-subtle,rgba(127,127,127,.10));"><span style="display:inline-flex;align-items:center;gap:6px;color:var(--color-token-text-secondary,#737373);font-weight:500;white-space:nowrap;"><i style="width:6px;height:6px;border-radius:999px;background:' + planColor + ';box-shadow:0 0 0 2px rgba(127,127,127,.10);"></i>' + escapeHtml(planLabel) + ' <small style="font:inherit;opacity:.62;">' + Math.max(0, Math.round(plan.count || 0)) + '</small></span><span style="display:inline-flex;align-items:center;gap:5px;color:var(--color-token-text-secondary,#737373);text-align:right;white-space:nowrap;">' + quotaHtml + '</span></div>';
         }};
         const detailCardStyle = 'position:fixed;z-index:4;width:min(260px,calc(100vw - 24px));box-sizing:border-box;padding:9px 11px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.16));border-radius:10px;background:var(--color-token-main-surface-primary,#fff);color:var(--color-token-text-secondary,#737373);box-shadow:0 4px 14px rgba(0,0,0,.09);font-family:inherit;font-size:12px;line-height:1.3;letter-spacing:normal;pointer-events:auto;';
         const currencySymbol = (code) => {{

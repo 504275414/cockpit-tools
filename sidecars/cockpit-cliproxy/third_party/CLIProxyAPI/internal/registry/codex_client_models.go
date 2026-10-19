@@ -120,9 +120,10 @@ func filterRetiredCodexClientModels(document map[string]json.RawMessage, models 
 }
 
 type codexClientModelsStore struct {
-	mu       sync.RWMutex
-	data     []byte
-	revision uint64
+	mu               sync.RWMutex
+	data             []byte
+	revision         uint64
+	contextTemplates map[string]CodexModelContextTemplate
 }
 
 var codexClientCatalogStore = &codexClientModelsStore{}
@@ -151,24 +152,35 @@ func GetCodexModelContextTemplate(modelID string) (CodexModelContextTemplate, bo
 	if modelID == "gpt-reserve" {
 		modelID = "gpt-5.6-luna"
 	}
+	codexClientCatalogStore.mu.RLock()
+	template, found := codexClientCatalogStore.contextTemplates[modelID]
+	codexClientCatalogStore.mu.RUnlock()
+	// Keep callers from mutating the immutable template shared by this revision.
+	if template.AutoCompactTokenLimit != nil {
+		compactLimit := *template.AutoCompactTokenLimit
+		template.AutoCompactTokenLimit = &compactLimit
+	}
+	return template, found
+}
+
+func decodeCodexModelContextTemplates(data []byte) (map[string]CodexModelContextTemplate, error) {
 	var catalog struct {
 		Models []struct {
 			Slug string `json:"slug"`
 			CodexModelContextTemplate
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(GetCodexClientModelsJSON(), &catalog); err != nil {
-		log.Panicf("registry: decode codex_client_models.json context fields for model %q: %v", modelID, err)
+	if err := json.Unmarshal(data, &catalog); err != nil {
+		return nil, fmt.Errorf("decode Codex client model context fields: %w", err)
 	}
+	templates := make(map[string]CodexModelContextTemplate, len(catalog.Models))
 	for _, model := range catalog.Models {
-		if strings.EqualFold(model.Slug, modelID) {
-			if model.ContextWindow <= 0 {
-				log.Panicf("registry: invalid context_window in codex_client_models.json for model %q", modelID)
-			}
-			return model.CodexModelContextTemplate, true
+		key := strings.ToLower(model.Slug)
+		if _, found := templates[key]; !found {
+			templates[key] = model.CodexModelContextTemplate
 		}
 	}
-	return CodexModelContextTemplate{}, false
+	return templates, nil
 }
 
 func CodexClientModelBaseInstructions(modelID string) string {
@@ -248,6 +260,12 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 			return false, fmt.Errorf("%s: encode active Codex client catalog: %w", source, err)
 		}
 	}
+	// Decode once per load, outside the store lock. Readers see this index and
+	// the catalog bytes switch together when the revision advances.
+	contextTemplates, err := decodeCodexModelContextTemplates(data)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", source, err)
+	}
 	cloned := append([]byte(nil), data...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
@@ -255,6 +273,7 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 		return false, nil
 	}
 	codexClientCatalogStore.data = cloned
+	codexClientCatalogStore.contextTemplates = contextTemplates
 	codexClientCatalogStore.revision++
 	return true, nil
 }

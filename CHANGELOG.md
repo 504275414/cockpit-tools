@@ -8,6 +8,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+## [1.3.71] - 2026-10-19
+
+### Added
+
+- **Official third-party ChatGPT access for API Service**: Link access to an existing Codex account and choose official access or the local gateway while retaining account details and quota displays. Includes access management, automatic renewal and reminder opt-out. Removing a service member retains access; Pelican and wakeups prefer linked official access. Official model and tool restrictions apply; image generation is unavailable.
+- **Automatic Codex quota sync**: Active local OAuth accounts refresh quota every 5–30 seconds without API Service, respecting disabled accounts, plan filters and group settings.
+- **OAuth quota protection**: Apply safety margins, near-reserve concurrency limits and quota confirmation before and after requests, with quota freshness and protection status visible.
+- **Automatic capability fallback in API Service**: Find a compatible account within the current key’s authorized scope when needed, switching only after definite pre-execution rejection with safely replayable history.
+- **Codex speed**: Restore Standard, Fast and Ultrafast, preserving defaults and saving user selections. Ultrafast cost estimates use 6× Standard rates.
+- Edit and view account tags directly on Pelican result cards.
+
+### Changed
+
+- New API Service OAuth bindings reserve 30% of the five-hour quota and 10% of the weekly quota by default, preserving existing settings. Quota confirmation accelerates near the reserve.
+- Proxy subscriptions update automatically with on-demand health checks. Existing node certificate exceptions remain in effect; ordinary TLS nodes retain certificate validation.
+- OAuth account switches automatically preserve active external bridges verified against local integration records.
+- Improve tool protocols, streaming responses and subagent history compatibility, with automatic adaptation and no extra switches or compatibility-model lists.
+
+### Fixed
+
+- Fix continuation failures involving host messages and legacy tool history after quota-triggered account switches, restarts or engine changes.
+- Preserve TLS failure details and rebuild affected connection pools without forcing reauthorization or replaying partially delivered tool calls.
+- Fix lingering Windows proxy processes holding ports, and startup blank screens caused by duplicate React runtimes in builds from SUBST drives or linked directories.
+- Fix model-setting persistence and dialog menu layouts. Align GPT-6 Astra, Sol and Luna context defaults to 272,000 tokens with an 872,000-token maximum while retaining user settings.
+- Preserve native Responses routes and independent API-key settings when only image capabilities change.
+- Route frontend voice calls through Cockpit for managed Codex instances with client injection enabled.
+- Fix duplicate update downloads and progress moving backward.
+
 ## [1.3.70] - 2026-10-16
 
 ### Fixed

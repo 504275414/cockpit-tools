@@ -593,6 +593,12 @@
   background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
+.codex-experimental-model-editor__reasoning-option:focus-visible,
+.codex-experimental-model-editor__context-option:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
 .codex-experimental-model-editor__reasoning-option.is-muted {
   opacity: 0.48;
 }

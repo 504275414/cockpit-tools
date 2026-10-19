@@ -104,6 +104,8 @@ type manifest struct {
 	Locale                     string                       `json:"locale"`
 	APIKeys                    []apiKeySpec                 `json:"apiKeys"`
 	Accounts                   []accountSpec                `json:"accounts"`
+	PausedAccountIDs           []string                     `json:"pausedAccountIds,omitempty"`
+	OfficialAccountBindings    map[string]string            `json:"officialAccountBindings,omitempty"`
 	ModelIDs                   []string                     `json:"modelIds"`
 	ImageGenerationModel       string                       `json:"imageGenerationModel"`
 	ImageGenerationMainModel   string                       `json:"imageGenerationMainModel,omitempty"`
@@ -403,21 +405,23 @@ type accountSpec struct {
 }
 
 type quotaReserveSpec struct {
-	HourlyThresholdPercent       *int   `json:"hourlyThresholdPercent,omitempty"`
-	WeeklyThresholdPercent       *int   `json:"weeklyThresholdPercent,omitempty"`
-	SnapshotUpdatedAtUnixSeconds *int64 `json:"snapshotUpdatedAtUnixSeconds,omitempty"`
-	HourlyRemainingPercent       *int   `json:"hourlyRemainingPercent,omitempty"`
-	WeeklyRemainingPercent       *int   `json:"weeklyRemainingPercent,omitempty"`
-	HourlyWindowPresent          *bool  `json:"hourlyWindowPresent,omitempty"`
-	WeeklyWindowPresent          *bool  `json:"weeklyWindowPresent,omitempty"`
+	SnapshotVerifiedQueryStartedAtUnixMillis *int64 `json:"snapshotVerifiedQueryStartedAtUnixMillis,omitempty"`
+	HourlyThresholdPercent                   *int   `json:"hourlyThresholdPercent,omitempty"`
+	WeeklyThresholdPercent                   *int   `json:"weeklyThresholdPercent,omitempty"`
+	SnapshotUpdatedAtUnixSeconds             *int64 `json:"snapshotUpdatedAtUnixSeconds,omitempty"`
+	HourlyRemainingPercent                   *int   `json:"hourlyRemainingPercent,omitempty"`
+	WeeklyRemainingPercent                   *int   `json:"weeklyRemainingPercent,omitempty"`
+	HourlyWindowPresent                      *bool  `json:"hourlyWindowPresent,omitempty"`
+	WeeklyWindowPresent                      *bool  `json:"weeklyWindowPresent,omitempty"`
 }
 
 type quotaReserveSnapshot struct {
-	SnapshotUpdatedAtUnixSeconds *int64 `json:"snapshotUpdatedAtUnixSeconds,omitempty"`
-	HourlyRemainingPercent       *int   `json:"hourlyRemainingPercent,omitempty"`
-	WeeklyRemainingPercent       *int   `json:"weeklyRemainingPercent,omitempty"`
-	HourlyWindowPresent          *bool  `json:"hourlyWindowPresent,omitempty"`
-	WeeklyWindowPresent          *bool  `json:"weeklyWindowPresent,omitempty"`
+	SnapshotVerifiedQueryStartedAtUnixMillis *int64 `json:"snapshotVerifiedQueryStartedAtUnixMillis,omitempty"`
+	SnapshotUpdatedAtUnixSeconds             *int64 `json:"snapshotUpdatedAtUnixSeconds,omitempty"`
+	HourlyRemainingPercent                   *int   `json:"hourlyRemainingPercent,omitempty"`
+	WeeklyRemainingPercent                   *int   `json:"weeklyRemainingPercent,omitempty"`
+	HourlyWindowPresent                      *bool  `json:"hourlyWindowPresent,omitempty"`
+	WeeklyWindowPresent                      *bool  `json:"weeklyWindowPresent,omitempty"`
 }
 
 type quotaReserveStateFile struct {
@@ -425,11 +429,12 @@ type quotaReserveStateFile struct {
 }
 
 type quotaReserveStateStore struct {
-	path     string
-	snapshot atomic.Value
-	mu       sync.Mutex
-	lastHash [sha256.Size]byte
-	hasHash  bool
+	admission *quotaProtectionCoordinator
+	path      string
+	snapshot  atomic.Value
+	mu        sync.Mutex
+	lastHash  [sha256.Size]byte
+	hasHash   bool
 }
 
 type modelAliasSpec struct {
@@ -595,6 +600,9 @@ type selectedAccountRecord struct {
 }
 
 type requestUsageTracker struct {
+	quotaManifest    *manifest
+	quotaState       *quotaReserveStateStore
+	quotaAdmission   *quotaProtectionCoordinator
 	mu               sync.Mutex
 	records          map[string][]usagePayload
 	selectedAccounts map[string]selectedAccountRecord
@@ -756,6 +764,7 @@ func (t *requestUsageTracker) releaseAccountSlots(requestID string) {
 	if t == nil {
 		return
 	}
+	defer t.releaseQuotaProtection(requestID)
 	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		return
@@ -1004,9 +1013,13 @@ func loadManifest(path string) (*manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
 	}
+	if err := validateSidecarOfficialBindings(&m); err != nil {
+		return nil, err
+	}
 	if err := validateGatewayIdentityManifest(&m); err != nil {
 		return nil, err
 	}
+	m.PausedAccountIDs = normalizePausedAccountIDs(m.PausedAccountIDs)
 	m.apiKeyByValue = make(map[string]*apiKeySpec)
 	for i := range m.APIKeys {
 		key := strings.TrimSpace(m.APIKeys[i].Key)
@@ -1343,6 +1356,7 @@ func (p *requestPolicy) middleware() gin.HandlerFunc {
 		startedAt := time.Now()
 		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), requestStartedAtContextKey, startedAt.UnixMilli()))
 		requestID := ensureRequestID(c)
+		c.Request = c.Request.WithContext(cliproxyexecutor.WithUpstreamSendGuard(c.Request.Context(), p.beforeUpstreamSend))
 		diagnostics := p.beginRequestDiagnostics(c, requestID, startedAt)
 		spec := p.lookupAPIKey(c.Request)
 		if p.serviceTierDefault != nil && spec != nil && spec.ProviderGateway == nil {

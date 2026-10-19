@@ -859,7 +859,7 @@ mod tests {
             });
         }
         modules::codex_instance::save_instance_store(&store).unwrap();
-        for speed in [CodexAppSpeed::Fast, CodexAppSpeed::Standard] {
+        for speed in [CodexAppSpeed::Ultrafast, CodexAppSpeed::Fast, CodexAppSpeed::Standard] {
             codex_update_instance(
                 "target".to_string(), None, None, None,
                 Some(Some("fixture-account".to_string())), None, None, None,

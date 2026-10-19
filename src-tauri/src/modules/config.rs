@@ -407,9 +407,6 @@ pub struct UserConfig {
     /// 启动时是否自动恢复 Codex 代理接管状态
     #[serde(default = "default_codex_auto_restore_takeover_on_launch")]
     pub codex_auto_restore_takeover_on_launch: bool,
-    /// OAuth 切号时保留经过本地集成记录验证的外部桥接（默认关闭）。
-    #[serde(default)]
-    pub codex_preserve_verified_external_bridge: bool,
     /// 切换 Antigravity IDE 时是否自动启动/重启应用
     #[serde(default = "default_antigravity_launch_on_switch")]
     pub antigravity_launch_on_switch: bool,
@@ -1323,7 +1320,6 @@ impl Default for UserConfig {
             codex_launch_on_switch: default_codex_launch_on_switch(),
             codex_auto_restore_takeover_on_launch:
                 default_codex_auto_restore_takeover_on_launch(),
-            codex_preserve_verified_external_bridge: false,
             antigravity_launch_on_switch: default_antigravity_launch_on_switch(),
             codex_restart_specified_app_on_switch: default_codex_restart_specified_app_on_switch(),
             codex_local_access_entry_visible: default_codex_local_access_entry_visible(),

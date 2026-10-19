@@ -375,21 +375,22 @@
     }
 
     #[test]
-    fn codex_takeover_settings_patch_persists_false_and_defaults_bridge_off() {
-        let mut config = UserConfig::default();
-        assert!(!config.codex_preserve_verified_external_bridge);
-        let updates = serde_json::json!({
-            "codex_auto_restore_takeover_on_launch": false,
-            "codex_preserve_verified_external_bridge": true
-        }).as_object().unwrap().clone();
-        apply_general_config_updates(&mut config, &updates).unwrap();
-        let saved = serde_json::to_value(&config).unwrap();
-        let loaded: UserConfig = serde_json::from_value(saved).unwrap();
-        assert!(!loaded.codex_auto_restore_takeover_on_launch);
-        assert!(loaded.codex_preserve_verified_external_bridge);
-        assert!(loaded.codex_launch_on_switch);
-        let updates = serde_json::json!({"codex_preserve_verified_external_bridge": false})
+    fn automatic_settings_ignore_legacy_opt_out_without_changing_other_preferences() {
+        let mut config: UserConfig = serde_json::from_value(serde_json::json!({
+            "codex_quota_sync_enabled": false,
+            "codex_preserve_verified_external_bridge": false
+        })).unwrap();
+        let updates = serde_json::json!({"codex_auto_restore_takeover_on_launch": false})
             .as_object().unwrap().clone();
         apply_general_config_updates(&mut config, &updates).unwrap();
-        assert!(!config.codex_preserve_verified_external_bridge);
+        let saved = serde_json::to_value(&config).unwrap();
+        assert!(saved.get("codex_quota_sync_enabled").is_none());
+        assert!(saved.get("codex_preserve_verified_external_bridge").is_none());
+        let loaded: UserConfig = serde_json::from_value(saved).unwrap();
+        assert!(!loaded.codex_auto_restore_takeover_on_launch);
+        assert!(loaded.codex_launch_on_switch);
+        for field in ["codex_quota_sync_enabled", "codex_preserve_verified_external_bridge"] {
+            let updates = serde_json::json!({(field): false}).as_object().unwrap().clone();
+            assert!(apply_general_config_updates(&mut config, &updates).is_err());
+        }
     }
