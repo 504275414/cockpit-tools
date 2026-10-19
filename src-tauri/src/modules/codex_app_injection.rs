@@ -1,8 +1,9 @@
-//! Codex/ChatGPT renderer 的 Cockpit Tools 额度显示注入。
+//! Codex/ChatGPT renderer 的 Cockpit Tools 额度显示与语音创建接入。
 //!
-//! 两种注入共用同一套 loopback CDP 通道：
+//! 以下注入共用同一套 loopback CDP 通道：
 //! - API 服务绑定：账号数、周额度、5h 额度；
 //! - DeepSeek 账号绑定（网关列出 / CDP 注入 / 直连官方）：该账号的余额。
+//! - API 服务及混合模型路由：前端语音创建请求转入实例网关。
 //!
 //! 该模块只连接实例自己的 loopback CDP 端口，不修改官方 app.asar，
 //! 也不修改官方额度或速度逻辑。额度以独立的小字段显示在 composer 操作栏下方。
@@ -52,6 +53,7 @@ const MODEL_RESYNC_INTERVAL: Duration = Duration::from_secs(10);
 const QUOTA_SCRIPT_KIND: &str = "api-service-quota";
 const DEEPSEEK_MODEL_SCRIPT_KIND: &str = "deepseek-model-picker";
 const DEEPSEEK_BALANCE_SCRIPT_KIND: &str = "deepseek-balance";
+const VOICE_SCRIPT_KIND: &str = "voice-create";
 const AUTH_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(5);
 const AUTH_IDENTITY_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const AUTH_NETWORK_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
@@ -521,7 +523,7 @@ pub fn restore_running_profiles(app: AppHandle) -> Result<usize, String> {
             }
             continue;
         };
-        let injection_enabled = should_enable_injection(bind_account_id.as_deref());
+        let injection_enabled = should_enable_profile_injection(&profile_dir, bind_account_id.as_deref());
         start_for_profile(
             app.clone(),
             instance_id.clone(),
@@ -632,7 +634,7 @@ pub fn start_for_profile(
             bind_account_id.as_deref(),
         );
     }
-    if !should_enable_injection(bind_account_id.as_deref()) {
+    if !should_enable_profile_injection(&profile_dir, bind_account_id.as_deref()) {
         return;
     }
     stop_injection_for_profile(&profile_dir);
@@ -652,6 +654,7 @@ struct ProfileGatewayConfig {
     base_url: String,
     api_key: String,
     provider_name: String,
+    managed_voice: bool,
 }
 
 fn read_profile_gateway_config(profile_dir: &Path) -> Option<ProfileGatewayConfig> {
@@ -691,8 +694,100 @@ fn read_profile_gateway_config(profile_dir: &Path) -> Option<ProfileGatewayConfi
         base_url,
         api_key,
         provider_name,
+        managed_voice: codex_local_access::has_managed_voice_gateway_config(&config_text),
     })
 }
+
+fn should_enable_profile_injection(profile_dir: &Path, bind_account_id: Option<&str>) -> bool {
+    if should_enable_injection(bind_account_id) {
+        return true;
+    }
+    if !enabled_for_app() {
+        return false;
+    }
+    match codex_local_access::profile_uses_mixed_model_gateway(profile_dir) {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            logger::log_warn("[Codex Voice] 无法读取实例的混合模型路由状态，未启动语音接入");
+            false
+        }
+    }
+}
+
+fn voice_injection_script(profile_dir: &Path, bind_account_id: Option<&str>) -> Result<Option<String>, String> {
+    if !enabled_for_app() {
+        return Ok(None);
+    }
+    if !supports_bind_account(bind_account_id)
+        && !codex_local_access::profile_uses_mixed_model_gateway(profile_dir)
+            .map_err(|_| "无法读取实例的混合模型路由状态".to_string())?
+    {
+        return Ok(None);
+    }
+    let gateway = read_profile_gateway_config(profile_dir)
+        .ok_or_else(|| "无法读取实例网关配置".to_string())?;
+    if !gateway.managed_voice {
+        return Ok(None);
+    }
+    let mut endpoint = reqwest::Url::parse(&gateway.base_url)
+        .map_err(|_| "实例网关地址无效".to_string())?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.path().trim_end_matches('/') != "/v1"
+    {
+        return Ok(None);
+    }
+    endpoint.set_path("/v1/live");
+    let config_json = json!({ "endpoint": endpoint.as_str(), "apiKey": gateway.api_key }).to_string();
+    Ok(Some(VOICE_INSTALL_SCRIPT.replace("__COCKPIT_VOICE_CONFIG__", &config_json)))
+}
+
+const VOICE_INSTALL_SCRIPT: &str = r#"(() => {
+  if (location.protocol !== "app:" || location.host !== "-" || typeof MessagePort === "undefined") return false;
+  const key = Symbol.for("cockpit.voice.transport");
+  if (globalThis[key]) return MessagePort.prototype.postMessage === globalThis[key];
+  const config = __COCKPIT_VOICE_CONFIG__;
+  const original = MessagePort.prototype.postMessage;
+  const wrapper = function(...args) {
+    const forward = () => Reflect.apply(original, this, args);
+    const message = args[0];
+    if (!Array.isArray(message) || message[0] !== "push") return forward();
+    const operation = message[1];
+    if (!Array.isArray(operation) || operation[0] !== "pipeline") return forward();
+    const path = operation[2], params = operation[3];
+    if (!Array.isArray(path) || path[path.length - 1] !== "fetch" || !Array.isArray(params)) return forward();
+    const request = params[1];
+    if (!request || typeof request !== "object" || String(request.method).toUpperCase() !== "POST" || typeof request.body !== "string") return forward();
+    let headers;
+    try { headers = new Headers(request.headers); } catch { return forward(); }
+    const alpha = headers.get("OpenAI-Alpha") || "";
+    if (!alpha.split(/[;,\s]+/).some(value => /^quicksilver=.+$/.test(value))) return forward();
+    let body;
+    try { body = JSON.parse(request.body); } catch { return forward(); }
+    if (!body || typeof body.sdp !== "string" || !body.sdp.trim() || !body.session || typeof body.session !== "object" || Array.isArray(body.session)) return forward();
+    const target = request.url;
+    const validTarget = typeof target === "string" && target.startsWith("/") && !target.startsWith("//") && !/[\\#\u0000-\u0020\u007f]/.test(target);
+    const allowed = new Set(["content-type", "openai-alpha", "thread-id", "session-id", "x-session-id", "x-codex-turn-metadata", "originator"]);
+    const nextHeaders = {};
+    headers.forEach((value, name) => { if (allowed.has(name.toLowerCase())) nextHeaders[name] = value; });
+    nextHeaders.Authorization = "Bearer " + config.apiKey;
+    // Let the gateway reject an invalid target without aborting the shared RPC connection.
+    nextHeaders["X-Cockpit-Voice-Target"] = validTarget ? target : "";
+    const nextRequest = { ...request, url: config.endpoint, headers: nextHeaders };
+    delete nextRequest.expectedIdentity;
+    const nextParams = params.slice(); nextParams[1] = nextRequest;
+    const nextOperation = operation.slice(); nextOperation[3] = nextParams;
+    const nextMessage = message.slice(); nextMessage[1] = nextOperation;
+    const nextArgs = args.slice(); nextArgs[0] = nextMessage;
+    return Reflect.apply(original, this, nextArgs);
+  };
+  MessagePort.prototype.postMessage = wrapper;
+  globalThis[key] = wrapper;
+  return true;
+})()"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectionBadgeKind {
@@ -2227,6 +2322,23 @@ async fn evaluate_target(
         if !install {
             return None;
         }
+        if script_kind == VOICE_SCRIPT_KIND {
+            timeout(CDP_CONNECT_TIMEOUT, async {
+                while let Some(message) = socket.next().await {
+                    let Ok(Message::Text(text)) = message else { continue };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+                    if value.get("error").is_some() {
+                        return None;
+                    }
+                    if value.get("id").and_then(Value::as_u64) == Some(1) {
+                        value.pointer("/result/identifier").and_then(Value::as_str)
+                            .filter(|identifier| !identifier.is_empty())?;
+                        return Some(());
+                    }
+                }
+                None
+            }).await.ok().flatten()?;
+        }
         mark_new_document_script_installed(&install_key);
     }
     if !socket
@@ -2253,6 +2365,13 @@ async fn evaluate_target(
                 continue;
             };
             if value.get("id").and_then(Value::as_i64) == Some(2) {
+                if script_kind == VOICE_SCRIPT_KIND
+                    && (value.get("error").is_some()
+                        || value.pointer("/result/exceptionDetails").is_some()
+                        || value.pointer("/result/result/value").and_then(Value::as_bool) != Some(true))
+                {
+                    return None;
+                }
                 return Some(InjectionEvalResult {
                     refresh_request_token: refresh_request_token_from_cdp_response(&value),
                     selected_model: selected_model_from_cdp_response(&value),
@@ -3496,11 +3615,19 @@ include!("codex_app_injection_quota.rs");
 
 async fn run_injection_loop(
     app: AppHandle,
-    _instance_id: String,
+    instance_id: String,
     profile_dir: PathBuf,
     port: u16,
     bind_account_id: Option<String>,
 ) {
+    // 语音配置只在注入任务启动时读取一次。
+    let voice_script = match voice_injection_script(&profile_dir, bind_account_id.as_deref()) {
+        Ok(script) => script,
+        Err(error) => {
+            logger::log_warn(&format!("[Codex Voice] 读取启动配置失败: instance_id={}, error={}", instance_id, error));
+            None
+        }
+    };
     let client = Client::new();
     // 余额接口是上游网络请求，必须自带超时，不能让注入循环被拖住。
     let balance_client = Client::builder()
@@ -3521,10 +3648,22 @@ async fn run_injection_loop(
     let mut observed_model = read_profile_selected_model(&profile_dir);
     let mut last_model_resync_at = Instant::now() - MODEL_RESYNC_INTERVAL;
     let mut refresh_tasks = JoinSet::new();
+    let mut voice_failure_logged = false;
     loop {
         if app_lifecycle::is_shutdown_started() {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
+        }
+        if let Some(script) = &voice_script {
+            let targets = query_targets(&client, port).await;
+            let mut failed = false;
+            for target in targets.iter().filter(|target| is_codex_app_target(target)) {
+                failed |= evaluate_target(target, script, VOICE_SCRIPT_KIND).await.is_none();
+            }
+            if failed && !voice_failure_logged {
+                logger::log_warn(&format!("[Codex Voice] 页面接入失败: instance_id={}, reason=cdp_install_or_evaluation_failed", instance_id));
+            }
+            voice_failure_logged = failed;
         }
         let mut refresh_finished = false;
         let mut refreshed_empty_pool = false;
@@ -3687,6 +3826,10 @@ async fn run_injection_loop(
                     }
                 }
             }
+            tokio::time::sleep(INJECTION_INTERVAL).await;
+            continue;
+        }
+        if !supports_bind_account(bind_account_id.as_deref()) {
             tokio::time::sleep(INJECTION_INTERVAL).await;
             continue;
         }
