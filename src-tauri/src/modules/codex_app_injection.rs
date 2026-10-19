@@ -250,7 +250,9 @@ pub fn should_enable_injection(bind_account_id: Option<&str>) -> bool {
 
 /// 额度注入、DeepSeek 余额、认证页面观察和 DeepSeek 模型适配都依赖实例自己的 loopback CDP。
 pub fn should_enable_cdp(bind_account_id: Option<&str>) -> bool {
-    auth_observation_enabled(bind_account_id) || should_enable_injection(bind_account_id)
+    auth_observation_enabled(bind_account_id)
+        || should_enable_injection(bind_account_id)
+        || crate::modules::codex_app_enhancements::enabled()
 }
 
 fn observed_oauth_account_id(bind_account_id: Option<&str>) -> Option<String> {
@@ -523,7 +525,8 @@ pub fn restore_running_profiles(app: AppHandle) -> Result<usize, String> {
             }
             continue;
         };
-        let injection_enabled = should_enable_profile_injection(&profile_dir, bind_account_id.as_deref());
+        let injection_enabled =
+            should_enable_profile_injection(&profile_dir, bind_account_id.as_deref());
         start_for_profile(
             app.clone(),
             instance_id.clone(),
@@ -546,6 +549,7 @@ pub fn restore_running_profiles(app: AppHandle) -> Result<usize, String> {
 }
 
 pub fn stop_for_profile(profile_dir: &Path) {
+    crate::modules::codex_app_enhancements::stop_for_profile(profile_dir);
     stop_auth_diagnostics_for_profile(profile_dir);
     stop_injection_for_profile(profile_dir);
 }
@@ -569,6 +573,7 @@ fn stop_auth_diagnostics_for_profile(profile_dir: &Path) {
 }
 
 pub fn stop_all() {
+    crate::modules::codex_app_enhancements::stop_all();
     if let Ok(mut items) = runtimes().lock() {
         for (_, runtime) in items.drain() {
             runtime.task.abort();
@@ -624,7 +629,35 @@ pub fn start_for_profile(
     port: Option<u16>,
     bind_account_id: Option<String>,
 ) {
+    start_profile(app, instance_id, profile_dir, port, bind_account_id, false);
+}
+
+/// Only the unified launch transaction grants one clean startup reload.
+pub fn start_for_launched_profile(
+    app: AppHandle,
+    instance_id: String,
+    profile_dir: PathBuf,
+    port: Option<u16>,
+    bind_account_id: Option<String>,
+) {
+    start_profile(app, instance_id, profile_dir, port, bind_account_id, true);
+}
+
+fn start_profile(
+    app: AppHandle,
+    instance_id: String,
+    profile_dir: PathBuf,
+    port: Option<u16>,
+    bind_account_id: Option<String>,
+    fresh_launch: bool,
+) {
     let Some(port) = port else { return };
+    crate::modules::codex_app_enhancements::start_for_profile(
+        profile_dir.clone(),
+        instance_id.clone(),
+        port,
+        fresh_launch,
+    );
     if auth_observation_enabled(bind_account_id.as_deref()) {
         start_auth_diagnostics_for_profile(
             app.clone(),
@@ -714,7 +747,10 @@ fn should_enable_profile_injection(profile_dir: &Path, bind_account_id: Option<&
     }
 }
 
-fn voice_injection_script(profile_dir: &Path, bind_account_id: Option<&str>) -> Result<Option<String>, String> {
+fn voice_injection_script(
+    profile_dir: &Path,
+    bind_account_id: Option<&str>,
+) -> Result<Option<String>, String> {
     if !enabled_for_app() {
         return Ok(None);
     }
@@ -729,8 +765,8 @@ fn voice_injection_script(profile_dir: &Path, bind_account_id: Option<&str>) -> 
     if !gateway.managed_voice {
         return Ok(None);
     }
-    let mut endpoint = reqwest::Url::parse(&gateway.base_url)
-        .map_err(|_| "实例网关地址无效".to_string())?;
+    let mut endpoint =
+        reqwest::Url::parse(&gateway.base_url).map_err(|_| "实例网关地址无效".to_string())?;
     if !matches!(endpoint.scheme(), "http" | "https")
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
@@ -741,8 +777,11 @@ fn voice_injection_script(profile_dir: &Path, bind_account_id: Option<&str>) -> 
         return Ok(None);
     }
     endpoint.set_path("/v1/live");
-    let config_json = json!({ "endpoint": endpoint.as_str(), "apiKey": gateway.api_key }).to_string();
-    Ok(Some(VOICE_INSTALL_SCRIPT.replace("__COCKPIT_VOICE_CONFIG__", &config_json)))
+    let config_json =
+        json!({ "endpoint": endpoint.as_str(), "apiKey": gateway.api_key }).to_string();
+    Ok(Some(
+        VOICE_INSTALL_SCRIPT.replace("__COCKPIT_VOICE_CONFIG__", &config_json),
+    ))
 }
 
 const VOICE_INSTALL_SCRIPT: &str = r#"(() => {
@@ -1044,11 +1083,13 @@ async fn api_service_grok_quota_lines(locale: &str) -> Vec<InjectionGrokQuotaLin
     }
     grouped
         .into_iter()
-        .map(|(product, (count, remaining_percent))| InjectionGrokQuotaLine {
-            product,
-            count,
-            remaining_percent,
-        })
+        .map(
+            |(product, (count, remaining_percent))| InjectionGrokQuotaLine {
+                product,
+                count,
+                remaining_percent,
+            },
+        )
         .collect()
 }
 
@@ -1230,8 +1271,7 @@ fn deepseek_model_injection_script(
     payload: &serde_json::Value,
     handled_selected_model: Option<&str>,
 ) -> String {
-    let payload =
-        serde_json::to_string(payload).unwrap_or_else(|_| "{\"models\":[]}".to_string());
+    let payload = serde_json::to_string(payload).unwrap_or_else(|_| "{\"models\":[]}".to_string());
     let handled =
         serde_json::to_string(&handled_selected_model).unwrap_or_else(|_| "null".to_string());
     format!(
@@ -1654,14 +1694,23 @@ fn injection_script(
     ))
     .unwrap_or_else(|_| "\"Total balance\"".to_string());
     // Grok 弹框只讲 Grok 额度：标题复用额度概览，空态复用 Grok 平台的空数据文案。
-    let quota_overview_label =
-        serde_json::to_string(&i18n::translate(locale, "codex.modelProviders.usage.title", &[]))
-            .unwrap_or_else(|_| "\"Quota Overview\"".to_string());
+    let quota_overview_label = serde_json::to_string(&i18n::translate(
+        locale,
+        "codex.modelProviders.usage.title",
+        &[],
+    ))
+    .unwrap_or_else(|_| "\"Quota Overview\"".to_string());
     let grok_empty_label =
         serde_json::to_string(&i18n::translate(locale, "grok.quotaQuery.empty", &[]))
             .unwrap_or_else(|_| "\"No quota\"".to_string());
     let balance_lines = serde_json::to_string(balance_lines).unwrap_or_else(|_| "[]".to_string());
-    let official_label = serde_json::to_string(&i18n::translate(locale, "chatgptPlan.officialFlow.badge", &[])).unwrap_or_default();
+    let official_label = serde_json::to_string(&i18n::translate(
+        locale,
+        "chatgptPlan.officialFlow.badge",
+        &[],
+    ))
+    .unwrap_or_default();
+    let badge_layout = include_str!("codex_app_injection_layout.js");
     format!(
         r#"(() => {{
       const providerName = {provider};
@@ -1697,6 +1746,7 @@ fn injection_script(
       const refreshInProgress = {refresh_in_progress};
       const handledRefreshToken = {handled_refresh_token};
       const hostHeartbeatTimeoutMs = 8000;
+      const badgeLayout = {badge_layout};
       const root = window.__cockpitCodexInjection || (window.__cockpitCodexInjection = {{}});
       root.hostHeartbeatAt = Date.now();
       root.hostAvailable = true;
@@ -1712,6 +1762,8 @@ fn injection_script(
         if (staleBalanceRoot.watchdogTimer) window.clearInterval(staleBalanceRoot.watchdogTimer);
         if (staleBalanceRoot.observer) staleBalanceRoot.observer.disconnect();
         if (staleBalanceRoot.resizeHandler) window.removeEventListener('resize', staleBalanceRoot.resizeHandler);
+        if (staleBalanceRoot.scrollHandler) window.removeEventListener('scroll', staleBalanceRoot.scrollHandler, true);
+        badgeLayout.disconnect(staleBalanceRoot);
         delete window.__cockpitDeepSeekBalance;
       }}
       document.querySelectorAll('[data-cockpit-deepseek-balance], [data-cockpit-deepseek-balance-details]').forEach((node) => node.remove());
@@ -1730,9 +1782,7 @@ fn injection_script(
           const details = document.querySelector('[data-cockpit-quota-details]');
           if (details) details.style.display = 'none';
           root.quotaDetailsOpen = false;
-          if (root.layoutObserver) root.layoutObserver.disconnect();
-          root.layoutFooter = null;
-          root.layoutPermissions = null;
+          badgeLayout.disconnect(root);
           root.visibleModelFooter = null;
           return;
         }}
@@ -1741,39 +1791,9 @@ fn injection_script(
           host.setAttribute('data-cockpit-quota-footer', 'true');
         }}
         if (host.parentElement !== document.body) document.body.appendChild(host);
-        if ('ResizeObserver' in window) {{
-          if (!root.layoutObserver) root.layoutObserver = new ResizeObserver(() => root.scheduleRender());
-          if (root.layoutFooter !== footer || root.layoutPermissions !== permissions) {{
-            root.layoutObserver.disconnect();
-            root.layoutObserver.observe(footer);
-            if (permissions !== footer) root.layoutObserver.observe(permissions);
-            root.layoutFooter = footer;
-            root.layoutPermissions = permissions;
-          }}
-        }}
-        const footerRect = footer.getBoundingClientRect();
         const permissionsRect = permissions.getBoundingClientRect();
-        // 底部徽章水平居中在当前聊天框的权限按钮和它右侧的「背景信息 / 模型」之间：
-        // 先找背景信息（上下文用量）元素，找不到就用模型选择器，取两个元素之间空档的中点。
-        const contextUsageRect = () => {{
-          const nodes = footer.querySelectorAll('[aria-label*="上下文用量"], [aria-label*="背景信息"], [aria-label*="context usage" i], [aria-label*="context window" i]');
-          for (const node of nodes) {{
-            const rect = node.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) return rect;
-          }}
-          return null;
-        }};
-        const contextRect = contextUsageRect();
         const modelTrigger = [...footer.querySelectorAll('[data-composer-navigation-target="reasoning"]')].find((node) => node.getClientRects().length > 0);
-        const modelAnchorNode = contextRect ? null : modelTrigger;
-        const rightAnchorRect = contextRect || (modelAnchorNode ? modelAnchorNode.getBoundingClientRect() : null);
-        const permissionsRight = permissionsRect.left + permissionsRect.width;
-        const badgeAnchorLeft = rightAnchorRect && rightAnchorRect.left > permissionsRight
-          ? Math.round((permissionsRight + rightAnchorRect.left) / 2)
-          : Math.round(footerRect.left + footerRect.width / 2);
-        host.style.cssText = 'position:fixed;transform:translate(-50%,-50%);z-index:2;display:flex;align-items:center;justify-content:center;gap:6px;color:var(--color-token-text-secondary,#737373);font-size:12px;line-height:1;white-space:nowrap;pointer-events:none;';
-        host.style.left = badgeAnchorLeft + 'px';
-        host.style.top = Math.round(permissionsRect.top + permissionsRect.height / 2) + 'px';
+        host.style.cssText = 'position:fixed;transform:translate(-50%,-50%);z-index:2;display:flex;align-items:center;justify-content:center;gap:6px;width:max-content;color:var(--color-token-text-secondary,#737373);font-size:12px;line-height:1;white-space:nowrap;pointer-events:none;';
         const badgeStyle = 'display:inline-flex;align-items:center;gap:6px;height:24px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.20));border-radius:999px;padding:0 9px;background:var(--color-token-main-surface-primary,rgba(127,127,127,.10));color:inherit;font:inherit;box-shadow:0 1px 2px rgba(0,0,0,.08);backdrop-filter:blur(8px);font-weight:500;cursor:pointer;pointer-events:auto;';
         const escapeHtml = (value) => String(value ?? '').replace(/[&<>\"']/g, (char) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}}[char]));
         const formatPercent = (value) => Number.isFinite(value) ? Math.round(value) + '%' : '—';
@@ -1898,7 +1918,12 @@ fn injection_script(
         if (fields.length) fields.push('<button type="button" data-cockpit-quota-refresh style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.20));border-radius:999px;padding:0;background:var(--color-token-main-surface-primary,rgba(127,127,127,.10));color:inherit;box-shadow:0 1px 2px rgba(0,0,0,.08);backdrop-filter:blur(8px);cursor:pointer;pointer-events:auto;transition:color .15s ease,border-color .15s ease,background .15s ease,opacity .15s ease"><svg data-cockpit-quota-refresh-icon viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M4 18v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.6-2.6L20 11"></path><path d="M4 13l2.3 4.6A7 7 0 0 0 17.9 15"></path></svg></button>');
         const nextHtml = fields.join('');
         if (host.innerHTML !== nextHtml) host.innerHTML = nextHtml;
-        host.style.display = fields.length ? 'flex' : 'none';
+        const placement = fields.length ? badgeLayout.place(root, host, footer, permissions) : null;
+        if (!placement) {{
+          host.style.display = 'none';
+          root.quotaDetailsOpen = false;
+        }}
+        const badgeAnchorLeft = placement ? placement.left : 0;
         let details = document.querySelector('[data-cockpit-quota-details]');
         if (!details) {{
           details = document.createElement('div');
@@ -1906,7 +1931,7 @@ fn injection_script(
           document.body.appendChild(details);
         }}
         details.style.cssText = detailCardStyle;
-        // 弹框与徽章共用同一个锚点（访问权限与背景信息/模型之间的中点）。
+        // 弹框跟随实际可用空档中的徽章；空间不足时关闭，避免挡住原生录音控件。
         details.style.left = badgeAnchorLeft + 'px';
         details.style.top = Math.max(12, Math.round(permissionsRect.top - 2)) + 'px';
         details.style.transform = 'translate(-50%,-100%)';
@@ -1970,6 +1995,10 @@ fn injection_script(
         root.resizeHandler = () => root.scheduleRender();
         window.addEventListener('resize', root.resizeHandler, {{passive:true}});
       }}
+      if (!root.scrollHandler) {{
+        root.scrollHandler = () => root.scheduleRender();
+        window.addEventListener('scroll', root.scrollHandler, {{passive:true,capture:true}});
+      }}
       if (!root.observer) {{
         root.observer = new MutationObserver((mutations) => {{
           const host = document.querySelector('[data-cockpit-quota-footer]');
@@ -1977,7 +2006,7 @@ fn injection_script(
           if (host && mutations.every((mutation) => mutation.target === host || host.contains(mutation.target) || (details && (mutation.target === details || details.contains(mutation.target))))) return;
           root.scheduleRender();
         }});
-        root.observer.observe(document.documentElement, {{childList:true,subtree:true}});
+        root.observer.observe(document.documentElement, {{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','data-state','data-dictation-view']}});
       }}
       if (!document.querySelector('[data-cockpit-quota-style]')) {{
         const style = document.createElement('style');
@@ -2064,6 +2093,7 @@ fn deepseek_balance_injection_script(
     let refresh_in_progress = if refresh_in_progress { "true" } else { "false" };
     let handled_refresh_token =
         serde_json::to_string(&handled_refresh_token).unwrap_or_else(|_| "null".to_string());
+    let badge_layout = include_str!("codex_app_injection_layout.js");
     format!(
         r#"(() => {{
       const balance = {balance};
@@ -2079,6 +2109,7 @@ fn deepseek_balance_injection_script(
       const refreshInProgress = {refresh_in_progress};
       const handledRefreshToken = {handled_refresh_token};
       const hostHeartbeatTimeoutMs = 8000;
+      const badgeLayout = {badge_layout};
       const root = window.__cockpitDeepSeekBalance || (window.__cockpitDeepSeekBalance = {{}});
       root.hostHeartbeatAt = Date.now();
       root.hostAvailable = true;
@@ -2090,11 +2121,14 @@ fn deepseek_balance_injection_script(
         if (staleQuotaRoot.watchdogTimer) window.clearInterval(staleQuotaRoot.watchdogTimer);
         if (staleQuotaRoot.observer) staleQuotaRoot.observer.disconnect();
         if (staleQuotaRoot.resizeHandler) window.removeEventListener('resize', staleQuotaRoot.resizeHandler);
-        if (staleQuotaRoot.layoutObserver) staleQuotaRoot.layoutObserver.disconnect();
+        if (staleQuotaRoot.scrollHandler) window.removeEventListener('scroll', staleQuotaRoot.scrollHandler, true);
+        badgeLayout.disconnect(staleQuotaRoot);
         delete staleQuotaRoot.watchdogTimer;
         delete staleQuotaRoot.observer;
         delete staleQuotaRoot.resizeHandler;
         delete staleQuotaRoot.layoutObserver;
+        delete staleQuotaRoot.layoutNodes;
+        delete staleQuotaRoot.scrollHandler;
         delete staleQuotaRoot.render;
         delete staleQuotaRoot.scheduleRender;
         delete staleQuotaRoot.renderScheduled;
@@ -2137,6 +2171,7 @@ fn deepseek_balance_injection_script(
           if (host) host.style.display = 'none';
           if (details) details.style.display = 'none';
           root.detailsOpen = false;
+          badgeLayout.disconnect(root);
           return;
         }}
         if (!host) {{
@@ -2149,35 +2184,17 @@ fn deepseek_balance_injection_script(
           details.setAttribute('data-cockpit-deepseek-balance-details', 'true');
           document.body.appendChild(details);
         }}
-        const footerRect = footer.getBoundingClientRect();
         const permissionsRect = permissions.getBoundingClientRect();
-        // 与 API 服务额度注入同一套锚点：居中在「访问权限」和右侧「背景信息 / 模型」之间。
-        const contextUsageRect = () => {{
-          const nodes = footer.querySelectorAll('[aria-label*="上下文用量"], [aria-label*="背景信息"], [aria-label*="context usage" i], [aria-label*="context window" i]');
-          for (const node of nodes) {{
-            const rect = node.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) return rect;
-          }}
-          return null;
-        }};
-        const contextRect = contextUsageRect();
-        const modelTrigger = [...footer.querySelectorAll('[data-composer-navigation-target="reasoning"]')].find((node) => node.getClientRects().length > 0);
-        const modelAnchorNode = contextRect ? null : modelTrigger;
-        const rightAnchorRect = contextRect || (modelAnchorNode ? modelAnchorNode.getBoundingClientRect() : null);
-        const permissionsRight = permissionsRect.left + permissionsRect.width;
-        const badgeAnchorLeft = rightAnchorRect && rightAnchorRect.left > permissionsRight
-          ? Math.round((permissionsRight + rightAnchorRect.left) / 2)
-          : Math.round(footerRect.left + footerRect.width / 2);
-        host.style.cssText = 'position:fixed;transform:translate(-50%,-50%);z-index:2;display:flex;align-items:center;justify-content:center;gap:6px;color:var(--color-token-text-secondary,#737373);font-size:12px;line-height:1;white-space:nowrap;pointer-events:none;';
-        host.style.left = badgeAnchorLeft + 'px';
-        host.style.top = Math.round(permissionsRect.top + permissionsRect.height / 2) + 'px';
+        host.style.cssText = 'position:fixed;transform:translate(-50%,-50%);z-index:2;display:flex;align-items:center;justify-content:center;gap:6px;width:max-content;color:var(--color-token-text-secondary,#737373);font-size:12px;line-height:1;white-space:nowrap;pointer-events:none;';
         const badgeStyle = 'display:inline-flex;align-items:center;gap:6px;height:24px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.20));border-radius:999px;padding:0 9px;background:var(--color-token-main-surface-primary,rgba(127,127,127,.10));color:inherit;font:inherit;box-shadow:0 1px 2px rgba(0,0,0,.08);backdrop-filter:blur(8px);font-weight:500;cursor:pointer;pointer-events:auto;';
         const currency = balance.currency || null;
         const totalText = formatMoney(balance.totalBalance, currency);
         const badgeHtml = '<button type="button" data-cockpit-deepseek-balance-open style="' + badgeStyle + '"><span style="width:6px;height:6px;border-radius:999px;background:#3b82f6"></span>' + escapeHtml(balanceLabel) + ' ' + escapeHtml(totalText) + '</button>'
           + '<button type="button" data-cockpit-deepseek-balance-refresh title="' + escapeHtml(refreshLabel) + '" aria-label="' + escapeHtml(refreshLabel) + '" style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.20));border-radius:999px;padding:0;background:var(--color-token-main-surface-primary,rgba(127,127,127,.10));color:inherit;box-shadow:0 1px 2px rgba(0,0,0,.08);backdrop-filter:blur(8px);cursor:pointer;pointer-events:auto;"><svg data-cockpit-deepseek-balance-refresh-icon viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6v5h-5"></path><path d="M4 18v-5h5"></path><path d="M6.1 9a7 7 0 0 1 11.6-2.6L20 11"></path><path d="M4 13l2.3 4.6A7 7 0 0 0 17.9 15"></path></svg></button>';
         if (host.innerHTML !== badgeHtml) host.innerHTML = badgeHtml;
-        host.style.display = 'flex';
+        const placement = badgeLayout.place(root, host, footer, permissions);
+        if (!placement) root.detailsOpen = false;
+        const badgeAnchorLeft = placement ? placement.left : 0;
         const row = (label, value) => '<div style="display:flex;align-items:center;justify-content:space-between;gap:9px;padding:6px 0;border-bottom:1px solid var(--color-token-border-subtle,rgba(127,127,127,.10));"><span style="color:var(--color-token-text-secondary,#737373);font-weight:500;white-space:nowrap;">' + escapeHtml(label) + '</span><span style="color:var(--color-token-text-secondary,#737373);text-align:right;white-space:nowrap;">' + escapeHtml(value) + '</span></div>';
         details.style.cssText = 'position:fixed;z-index:4;width:min(240px,calc(100vw - 24px));box-sizing:border-box;padding:9px 11px;border:1px solid var(--color-token-border-subtle,rgba(127,127,127,.16));border-radius:10px;background:var(--color-token-main-surface-primary,#fff);color:var(--color-token-text-secondary,#737373);box-shadow:0 4px 14px rgba(0,0,0,.09);font-family:inherit;font-size:12px;line-height:1.3;letter-spacing:normal;pointer-events:auto;';
         details.style.left = badgeAnchorLeft + 'px';
@@ -2224,6 +2241,10 @@ fn deepseek_balance_injection_script(
         root.resizeHandler = () => root.scheduleRender();
         window.addEventListener('resize', root.resizeHandler, {{passive:true}});
       }}
+      if (!root.scrollHandler) {{
+        root.scrollHandler = () => root.scheduleRender();
+        window.addEventListener('scroll', root.scrollHandler, {{passive:true,capture:true}});
+      }}
       if (!root.observer) {{
         root.observer = new MutationObserver((mutations) => {{
           const host = document.querySelector('[data-cockpit-deepseek-balance]');
@@ -2231,7 +2252,7 @@ fn deepseek_balance_injection_script(
           if (host && mutations.every((mutation) => mutation.target === host || host.contains(mutation.target) || (details && (mutation.target === details || details.contains(mutation.target))))) return;
           root.scheduleRender();
         }});
-        root.observer.observe(document.documentElement, {{childList:true,subtree:true}});
+        root.observer.observe(document.documentElement, {{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','data-state','data-dictation-view']}});
       }}
       if (!document.querySelector('[data-cockpit-quota-style]')) {{
         const style = document.createElement('style');
@@ -2330,19 +2351,28 @@ async fn evaluate_target(
         if script_kind == VOICE_SCRIPT_KIND {
             timeout(CDP_CONNECT_TIMEOUT, async {
                 while let Some(message) = socket.next().await {
-                    let Ok(Message::Text(text)) = message else { continue };
-                    let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+                    let Ok(Message::Text(text)) = message else {
+                        continue;
+                    };
+                    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
                     if value.get("error").is_some() {
                         return None;
                     }
                     if value.get("id").and_then(Value::as_u64) == Some(1) {
-                        value.pointer("/result/identifier").and_then(Value::as_str)
+                        value
+                            .pointer("/result/identifier")
+                            .and_then(Value::as_str)
                             .filter(|identifier| !identifier.is_empty())?;
                         return Some(());
                     }
                 }
                 None
-            }).await.ok().flatten()?;
+            })
+            .await
+            .ok()
+            .flatten()?;
         }
         mark_new_document_script_installed(&install_key);
     }
@@ -2373,7 +2403,10 @@ async fn evaluate_target(
                 if script_kind == VOICE_SCRIPT_KIND
                     && (value.get("error").is_some()
                         || value.pointer("/result/exceptionDetails").is_some()
-                        || value.pointer("/result/result/value").and_then(Value::as_bool) != Some(true))
+                        || value
+                            .pointer("/result/result/value")
+                            .and_then(Value::as_bool)
+                            != Some(true))
                 {
                     return None;
                 }
@@ -3629,7 +3662,10 @@ async fn run_injection_loop(
     let voice_script = match voice_injection_script(&profile_dir, bind_account_id.as_deref()) {
         Ok(script) => script,
         Err(error) => {
-            logger::log_warn(&format!("[Codex Voice] 读取启动配置失败: instance_id={}, error={}", instance_id, error));
+            logger::log_warn(&format!(
+                "[Codex Voice] 读取启动配置失败: instance_id={}, error={}",
+                instance_id, error
+            ));
             None
         }
     };
@@ -3663,7 +3699,9 @@ async fn run_injection_loop(
             let targets = query_targets(&client, port).await;
             let mut failed = false;
             for target in targets.iter().filter(|target| is_codex_app_target(target)) {
-                failed |= evaluate_target(target, script, VOICE_SCRIPT_KIND).await.is_none();
+                failed |= evaluate_target(target, script, VOICE_SCRIPT_KIND)
+                    .await
+                    .is_none();
             }
             if failed && !voice_failure_logged {
                 logger::log_warn(&format!("[Codex Voice] 页面接入失败: instance_id={}, reason=cdp_install_or_evaluation_failed", instance_id));
@@ -3725,10 +3763,9 @@ async fn run_injection_loop(
                 crate::modules::codex_account::account_uses_cdp_model_injection(deepseek_account);
             if deepseek_cdp {
                 let account_id = Some(deepseek_account.id.clone());
-                let payload =
-                    crate::modules::codex_account::provider_injection_model_payload(
-                        deepseek_account,
-                    );
+                let payload = crate::modules::codex_account::provider_injection_model_payload(
+                    deepseek_account,
+                );
                 let script = deepseek_model_injection_script(
                     &locale,
                     &payload,

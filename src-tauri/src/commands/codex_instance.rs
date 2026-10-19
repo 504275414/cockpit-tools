@@ -3155,7 +3155,7 @@ async fn codex_start_instance_internal(
         ));
         let finalize_started = Instant::now();
         let updated = modules::codex_instance::update_default_pid(Some(pid))?;
-        modules::codex_app_injection::start_for_profile(
+        modules::codex_app_injection::start_for_launched_profile(
             app.clone(),
             DEFAULT_INSTANCE_ID.to_string(),
             default_dir.clone(),
@@ -3464,7 +3464,7 @@ async fn codex_start_instance_internal(
     ));
     let finalize_started = Instant::now();
     let updated = modules::codex_instance::update_instance_after_start(&instance.id, pid)?;
-    modules::codex_app_injection::start_for_profile(
+    modules::codex_app_injection::start_for_launched_profile(
         app.clone(),
         instance.id.clone(),
         instance_dir.to_path_buf(),

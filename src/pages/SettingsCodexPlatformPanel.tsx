@@ -1,3 +1,4 @@
+import { CodexAppEnhancementSettings } from '../components/codex/CodexAppEnhancementSettings';
 import { CodexRefreshPlanScopeControl } from '../components/CodexRefreshPlanScopeControl';
 import { CodexRequestPayloadSetting } from '../components/codex/CodexRequestPayloadSetting';
 import { AutoSwitchAccountScopeSelector } from '../components/AutoSwitchAccountScopeSelector';
@@ -263,6 +264,8 @@ export function SettingsCodexPlatformPanel(props: SettingsPageViewProps) {
                   </label>
                 </div>
               </div>
+
+              <CodexAppEnhancementSettings variant="settings" />
 
               <CodexSshSyncSettingsControl variant="settings" />
 

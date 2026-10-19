@@ -257,6 +257,31 @@
     }
 
     #[test]
+    fn general_config_patch_validates_codex_app_enhancements_atomically() {
+        let mut config = UserConfig::default();
+        config.language = "ja".to_string();
+        let updates = serde_json::json!({
+            "codex_app_native_fast_enabled": true,
+            "codex_app_api_quota_compat_enabled": true,
+            "codex_app_api_dictation_enabled": true,
+            "codex_app_api_dictation_model": " custom/transcribe "
+        });
+        apply_general_config_updates(&mut config, updates.as_object().unwrap()).unwrap();
+        assert!(config.codex_app_native_fast_enabled);
+        assert!(config.codex_app_api_quota_compat_enabled);
+        assert!(config.codex_app_api_dictation_enabled);
+        assert_eq!(config.codex_app_api_dictation_model, "custom/transcribe");
+        assert_eq!(config.language, "ja");
+        let invalid = serde_json::json!({
+            "codex_app_native_fast_enabled": false,
+            "codex_app_api_dictation_model": "invalid model"
+        });
+        assert!(apply_general_config_updates(&mut config, invalid.as_object().unwrap()).is_err());
+        assert!(config.codex_app_native_fast_enabled);
+        assert_eq!(config.codex_app_api_dictation_model, "custom/transcribe");
+    }
+
+    #[test]
     fn general_config_patch_only_changes_submitted_fields() {
         let mut config = UserConfig {
             theme: "dark".to_string(),

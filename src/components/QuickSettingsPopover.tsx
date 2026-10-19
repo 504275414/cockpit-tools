@@ -1,3 +1,4 @@
+import { CodexAppEnhancementSettings } from './codex/CodexAppEnhancementSettings';
 import { resolveCodexAccountDisplayName } from "../utils/codexAccountDisplayName";
 import { CodexRefreshPlanScopeControl } from './CodexRefreshPlanScopeControl';
 import { CodexRequestPayloadSetting } from './codex/CodexRequestPayloadSetting';
@@ -1877,6 +1878,7 @@ export function QuickSettingsPopover({ type }: QuickSettingsPopoverProps) {
                 <CodexRefreshPlanScopeControl value={config.codex_auto_refresh_plan_types}
                   onChange={(value) => void saveConfig({ codex_auto_refresh_plan_types: value })} />
                 <CodexRequestPayloadSetting />
+                <CodexAppEnhancementSettings variant="quick" onError={setError} />
               </div>
             )}
             {type === 'codex' && (
