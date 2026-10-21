@@ -10,10 +10,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Changed
-
-- Restore the QQ group QR code in the Chinese README alongside the existing WeChat and Telegram contact information.
-
 ## [1.3.72] - 2026-10-21
 
 ### Added
