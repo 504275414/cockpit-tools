@@ -8,6 +8,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   useEffect,
   useMemo,
@@ -33,6 +34,7 @@ import {
 import { getCodexModelReasoningEfforts } from "../../services/codexService";
 import { CODEX_REASONING_EFFORT_ORDER, sortCodexReasoningEfforts, withSupportedReasoningEfforts } from "../../utils/codexModelConfig";
 import { dropdownLayer, dropdownPlacement, type DropdownPlacement } from "../../utils/dropdownPlacement";
+import { useEscCloseTopmost } from "../../hooks/useEscClose";
 import { SingleSelectDropdown } from "../SingleSelectDropdown";
 import { CodexModelConfigTransferModal } from "./CodexModelConfigTransferModal";
 import "./CodexExperimentalModelEditor.css";
@@ -417,6 +419,46 @@ export function CodexExperimentalModelEditor({
   const [pickerMenuStyle, setPickerMenuStyle] = useState<DropdownPlacement | null>(null);
   const pickerOpen = !disabled && (mode === "inline" || managerOpen)
     && (openReasoningIndex !== null || openContextIndex !== null);
+  const closePicker = (restoreFocus = true) => {
+    setOpenReasoningIndex(null);
+    setOpenContextIndex(null);
+    if (restoreFocus) pickerTriggerRef.current?.focus();
+  };
+  const focusPickerSelection = () => {
+    (pickerMenuRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?? pickerMenuRef.current?.querySelector<HTMLElement>('[role="option"]'))?.focus();
+  };
+  const openPicker = (kind: "reasoning" | "context", index: number) => {
+    if ((kind === "reasoning" ? openReasoningIndex : openContextIndex) === index) {
+      focusPickerSelection();
+      return;
+    }
+    setPickerMenuStyle(null);
+    setOpenReasoningIndex(kind === "reasoning" ? index : null);
+    setOpenContextIndex(kind === "context" ? index : null);
+  };
+  const handlePickerKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      closePicker();
+      return;
+    }
+    const items = Array.from(pickerMenuRef.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    if (!items.length) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : event.key === "ArrowDown" ? (index + 1) % items.length
+      : event.key === "ArrowUp" ? (index - 1 + items.length) % items.length : -1;
+    if (next >= 0) {
+      event.preventDefault();
+      items[next].focus();
+    }
+  };
+  useEscCloseTopmost(pickerOpen, closePicker, pickerMenuRef);
+  useEffect(() => {
+    if (!pickerOpen || !pickerMenuStyle) return;
+    focusPickerSelection();
+  }, [pickerOpen, openReasoningIndex, openContextIndex, Boolean(pickerMenuStyle)]);
   useEffect(() => {
     if (!disabled && (mode === "inline" || managerOpen)) return;
     setOpenReasoningIndex(null);
@@ -455,8 +497,7 @@ export function CodexExperimentalModelEditor({
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (pickerTriggerRef.current?.contains(target) || pickerMenuRef.current?.contains(target)) return;
-      setOpenReasoningIndex(null);
-      setOpenContextIndex(null);
+      closePicker(false);
     };
     updateMenuPosition();
     document.addEventListener("pointerdown", handlePointerDown);
@@ -715,7 +756,7 @@ export function CodexExperimentalModelEditor({
         return withSupportedReasoningEfforts(model, [...current, effort]);
       }),
     );
-    if (effort === "official") setOpenReasoningIndex(null);
+    if (effort === "official") closePicker();
   };
 
   const applyContextPreset = (
@@ -736,13 +777,13 @@ export function CodexExperimentalModelEditor({
         return { ...model, ...CONTEXT_PRESETS[preset] };
       }),
     );
-    setOpenContextIndex(null);
+    closePicker();
   };
 
   const openCustomContextEditor = (index: number) => {
     const model = models[index];
     const template = model.context_window == null ? getCodexModelContextTemplate(model.model_id) : undefined;
-    setOpenContextIndex(null);
+    closePicker();
     const contextWindow =
       model.context_window ?? template?.context_window ?? DEFAULT_CONTEXT_DRAFT.context_window;
     setCustomContextDraft({
@@ -1171,13 +1212,16 @@ export function CodexExperimentalModelEditor({
                     type="button"
                     className="codex-experimental-model-editor__reasoning-trigger"
                     onClick={() => {
-                      setPickerMenuStyle(null);
-                      setOpenContextIndex(null);
-                      setOpenReasoningIndex((current) =>
-                        current === index ? null : index,
-                      );
+                      if (openReasoningIndex === index) closePicker();
+                      else openPicker("reasoning", index);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                      event.preventDefault();
+                      openPicker("reasoning", index);
                     }}
                     disabled={disabled}
+                    aria-haspopup="listbox"
                     aria-expanded={openReasoningIndex === index}
                     title={
                       model.reasoning_efforts?.length
@@ -1201,9 +1245,16 @@ export function CodexExperimentalModelEditor({
                   {pickerOpen && openReasoningIndex === index && createPortal(
                     <div className="codex-experimental-model-editor__reasoning-menu"
                       ref={pickerMenuRef}
+                      role="listbox"
+                      aria-label={t("codex.experimentalModelCatalog.models.reasoning")}
+                      aria-multiselectable="true"
+                      onKeyDown={handlePickerKeyDown}
                       style={{ ...pickerMenuStyle, visibility: pickerMenuStyle ? "visible" : "hidden" }}>
                       <button
                         type="button"
+                        role="option"
+                        aria-selected={!model.reasoning_efforts?.length}
+                        tabIndex={-1}
                         className={`codex-experimental-model-editor__reasoning-option${
                           !model.reasoning_efforts?.length
                             ? " is-selected"
@@ -1231,6 +1282,9 @@ export function CodexExperimentalModelEditor({
                           <button
                             key={effort}
                             type="button"
+                            role="option"
+                            aria-selected={selected}
+                            tabIndex={-1}
                             className={`codex-experimental-model-editor__reasoning-option${
                               selected
                                 ? " is-selected"
@@ -1285,13 +1339,16 @@ export function CodexExperimentalModelEditor({
                     type="button"
                     className="codex-experimental-model-editor__context-trigger"
                     onClick={() => {
-                      setPickerMenuStyle(null);
-                      setOpenReasoningIndex(null);
-                      setOpenContextIndex((current) =>
-                        current === index ? null : index,
-                      );
+                      if (openContextIndex === index) closePicker();
+                      else openPicker("context", index);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                      event.preventDefault();
+                      openPicker("context", index);
                     }}
                     disabled={disabled}
+                    aria-haspopup="listbox"
                     aria-expanded={openContextIndex === index}
                     title={contextLabel(model)}
                   >
@@ -1301,6 +1358,9 @@ export function CodexExperimentalModelEditor({
                   {pickerOpen && openContextIndex === index && createPortal(
                     <div className="codex-experimental-model-editor__context-menu"
                       ref={pickerMenuRef}
+                      role="listbox"
+                      aria-label={t("codex.experimentalModelCatalog.models.contextConfig")}
+                      onKeyDown={handlePickerKeyDown}
                       style={{ ...pickerMenuStyle, visibility: pickerMenuStyle ? "visible" : "hidden" }}>
                       {(
                         [
@@ -1325,6 +1385,9 @@ export function CodexExperimentalModelEditor({
                         <button
                           key={preset}
                           type="button"
+                          role="option"
+                          aria-selected={resolveContextPreset(model) === preset}
+                          tabIndex={-1}
                           className={`codex-experimental-model-editor__context-option${
                             resolveContextPreset(model) === preset
                               ? " is-selected"

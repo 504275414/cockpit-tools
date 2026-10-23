@@ -6,12 +6,32 @@ use tokio::sync::Semaphore;
 
 #[derive(Default)]
 struct Recorder {
+    quotas: Mutex<Vec<(String, super::super::rate_limits::QuotaSnapshot)>>,
     reports: Mutex<Vec<RequestReport>>,
     contexts: Mutex<Vec<DiagnosticContext>>,
+    invalidations: Mutex<Vec<String>>,
     changed: Notify,
+    quota_checks: Mutex<Vec<String>>,
+    quota_denied: Mutex<Vec<String>>,
 }
 
 impl Host for Recorder {
+    fn check_quota_before_send(&self, account_id: &str) -> Result<(), ServiceError> {
+        self.quota_checks.lock().unwrap().push(account_id.into());
+        if self.quota_denied.lock().unwrap().iter().any(|id| id == account_id) {
+            return Err(ServiceError::new(429, "quota_reserved", "Synthetic reserve"));
+        }
+        Ok(())
+    }
+
+    fn invalidate_transport(&self, identity: &str) -> bool {
+        self.invalidations.lock().unwrap().push(identity.to_owned());
+        true
+    }
+    fn observe_rate_limits(&self, account_id: &str, snapshot: super::super::rate_limits::QuotaSnapshot,
+        _: std::time::Instant) {
+        self.quotas.lock().unwrap().push((account_id.to_owned(), snapshot));
+    }
     fn authorize<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Caller, ServiceError>> {
         Box::pin(async { unreachable!() })
     }
@@ -37,6 +57,8 @@ impl Host for Recorder {
         })
     }
 }
+
+include!("lifecycle_dispatch_tests.rs");
 
 fn usage() -> Value {
     json!({"input_tokens": 17, "output_tokens": 23, "total_tokens": 40})
@@ -83,6 +105,27 @@ async fn recorded(host: &Recorder) -> RequestReport {
     })
     .await
     .expect("report persisted without waiting for a live request")
+}
+
+#[tokio::test]
+async fn native_lifecycle_quota_is_observed_before_completion_and_ignores_outgoing_headers() {
+    let (mut tracker, host, _activity, _stop, _gate) = fixture().await;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-codex-primary-used-percent", "89.5".parse().unwrap());
+    tracker.quota_headers(&headers);
+    assert!(host.quotas.lock().unwrap().is_empty(), "unrelated providers cannot update Codex quota");
+    tracker.quota_account = Some("oauth-quota-fixture".into());
+    tracker.upstream_headers(&headers);
+    assert!(host.quotas.lock().unwrap().is_empty(), "request headers are not quota evidence");
+    tracker.quota_headers(&headers);
+    tracker.quota_event(&json!({"type":"codex.rate_limits","rate_limits":{
+        "secondary":{"used_percent":75.25,"window_minutes":10080,"reset_at":5000}}}));
+    let quotas = host.quotas.lock().unwrap();
+    assert_eq!(quotas.len(), 2);
+    assert_eq!(quotas[0].0, "oauth-quota-fixture");
+    assert_eq!(quotas[0].1.primary.as_ref().unwrap().remaining_percent, 10.5);
+    assert_eq!(quotas[1].1.secondary.as_ref().unwrap().remaining_percent, 24.75);
+    assert!(host.reports.lock().unwrap().is_empty(), "quota delivery does not wait for request persistence");
 }
 
 #[tokio::test]

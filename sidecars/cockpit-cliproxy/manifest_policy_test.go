@@ -918,6 +918,9 @@ func TestBuildCockpitQuotaResponseGroupsPlansAndPoolHealth(t *testing.T) {
 	if response.AvailableAccountCount != 1 || response.AbnormalAccountCount != 1 || response.CooldownAccountCount != 1 {
 		t.Fatalf("runtime pool health = available %d, abnormal %d, cooldown %d", response.AvailableAccountCount, response.AbnormalAccountCount, response.CooldownAccountCount)
 	}
+	if response.FiveHourCapacityPercent == nil || *response.FiveHourCapacityPercent != 100 || response.WeeklyCapacityPercent == nil || *response.WeeklyCapacityPercent != 200 {
+		t.Fatalf("runtime cooldown must not change counted window capacity: %#v", response)
+	}
 }
 
 func TestBuildCockpitQuotaResponseBlocksHourlyWhenWeeklyIsExhausted(t *testing.T) {
@@ -2374,19 +2377,21 @@ func TestQuotaReserveSelectorFiltersCachedSessionAffinityAuth(t *testing.T) {
 			hourlyThreshold := 10
 			weeklyThreshold := 20
 			snapshotUpdatedAt := time.Now().Unix()
+			verifiedStartedAt := time.Now().UnixMilli()
 			hourlyRemaining := 80
 			weeklyRemaining := 80
 			windowPresent := true
 			protectedPlanRank := 2
 			normalPlanRank := 1
 			reserve := &quotaReserveSpec{
-				HourlyThresholdPercent:       &hourlyThreshold,
-				WeeklyThresholdPercent:       &weeklyThreshold,
-				SnapshotUpdatedAtUnixSeconds: &snapshotUpdatedAt,
-				HourlyRemainingPercent:       &hourlyRemaining,
-				WeeklyRemainingPercent:       &weeklyRemaining,
-				HourlyWindowPresent:          &windowPresent,
-				WeeklyWindowPresent:          &windowPresent,
+				SnapshotVerifiedQueryStartedAtUnixMillis: &verifiedStartedAt,
+				HourlyThresholdPercent:                   &hourlyThreshold,
+				WeeklyThresholdPercent:                   &weeklyThreshold,
+				SnapshotUpdatedAtUnixSeconds:             &snapshotUpdatedAt,
+				HourlyRemainingPercent:                   &hourlyRemaining,
+				WeeklyRemainingPercent:                   &weeklyRemaining,
+				HourlyWindowPresent:                      &windowPresent,
+				WeeklyWindowPresent:                      &windowPresent,
 			}
 			protectedAccount := &accountSpec{
 				ID:           "protected",
@@ -2424,20 +2429,20 @@ func TestQuotaReserveSelectorFiltersCachedSessionAffinityAuth(t *testing.T) {
 				OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`),
 			}
 
-			first, err := selector.Pick(context.Background(), "codex", "gpt-5.4", opts, auths)
+			first, err := selector.Pick(accountConcurrencyRequestContext("quota-affinity"), "codex", "gpt-5.4", opts, auths)
 			if err != nil {
 				t.Fatalf("initial Pick: %v", err)
 			}
 			if first == nil || first.ID != "protected.json" {
 				t.Fatalf("expected protected auth to establish affinity, got %#v", first)
 			}
-			cached, err := selector.Pick(context.Background(), "codex", "gpt-5.4", opts, auths)
+			cached, err := selector.Pick(accountConcurrencyRequestContext("quota-affinity"), "codex", "gpt-5.4", opts, auths)
 			if err != nil || cached == nil || cached.ID != "protected.json" {
 				t.Fatalf("expected protected affinity cache hit, got auth=%#v err=%v", cached, err)
 			}
 
 			tt.mutateReserve(reserve)
-			selected, err := selector.Pick(context.Background(), "codex", "gpt-5.4", opts, auths)
+			selected, err := selector.Pick(accountConcurrencyRequestContext("quota-affinity"), "codex", "gpt-5.4", opts, auths)
 			if tt.wantError != "" {
 				if selected != nil {
 					t.Fatalf("expected no auth after reserve block, got %#v", selected)

@@ -2729,6 +2729,7 @@ export function useCodexModelProviderManagerController({
       buildCodexPlanFilterOptions(providerOauthTierCounts, {
         includeError: false,
         pendingLabel: t("codex.pendingAuth.badge", "待授权"),
+        chatgptPlanLabel: t("chatgptPlan.title"),
       }),
     [providerOauthTierCounts, t],
   );

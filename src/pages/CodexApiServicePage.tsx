@@ -1,3 +1,6 @@
+import { codexServiceOriginalAccounts } from "../utils/chatgptPlanOverview";
+import { useChatGptPlanOverview } from "../hooks/useChatGptPlanOverview";
+import { codexServiceRelatedEndpointIds } from "../utils/chatgptPlanOverview";
 import {
   useCallback,
   useEffect,
@@ -864,7 +867,8 @@ export function useCodexApiServicePageController() {
   );
   const totals = selectedStatsWindow?.totals;
   const memberIds = collection?.accountIds ?? [];
-  const localAccessAccounts = useMemo(() => accounts, [accounts]);
+  const planGrants = useChatGptPlanOverview(collection?.accountIds, collection?.officialAccountBindings);
+  const localAccessAccounts = useMemo(() => codexServiceOriginalAccounts(accounts, collection?.accountIds), [accounts, collection?.accountIds]);
   const memberAccounts = useMemo(
     () =>
       memberIds
@@ -906,8 +910,8 @@ export function useCodexApiServicePageController() {
     return next;
   }, [state?.accountHealth]);
   const quotaPoolSummary = useMemo(
-    () => summarizeCodexQuotaPool(memberAccounts),
-    [memberAccounts],
+    () => summarizeCodexQuotaPool(memberAccounts, { sourceAccounts: accounts, grants: planGrants.accounts, displaySourceIds: planGrants.displaySourceIds }),
+    [memberAccounts, accounts, planGrants.accounts, planGrants.displaySourceIds],
   );
   const baseUrl = state?.baseUrl || FALLBACK_BASE_URL;
   const displayBaseUrl =
@@ -1269,6 +1273,11 @@ export function useCodexApiServicePageController() {
       void reloadState();
     };
     window.addEventListener("codex-local-access-state-updated", onUpdated);
+    const onChatgptPlanUpdated = () => {
+      void fetchAccounts();
+      void reloadState();
+    };
+    window.addEventListener("chatgpt-plan-accounts-changed", onChatgptPlanUpdated);
     let disposed = false;
     let unlistenTauri: (() => void) | null = null;
     void listen("codex-local-access-state-updated", onUpdated).then((dispose) => {
@@ -1282,6 +1291,7 @@ export function useCodexApiServicePageController() {
       disposed = true;
       mountedRef.current = false;
       window.removeEventListener("codex-local-access-state-updated", onUpdated);
+      window.removeEventListener("chatgpt-plan-accounts-changed", onChatgptPlanUpdated);
       unlistenTauri?.();
     };
   }, [fetchAccounts, fetchCurrentAccount, reloadState]);
@@ -1994,6 +2004,9 @@ export function useCodexApiServicePageController() {
     backupAccountIds?: string[],
     preferredAccountIds?: string[],
     imageGenerationAccountPolicies?: Record<string, CodexLocalAccessImageGenerationPolicy>,
+    officialAccountBindings?: Record<string, string>,
+    sessionAffinity?: boolean,
+    sessionAffinityTtlMs?: number,
   ) => {
     const filteredAccountIds =
       accountIds.length === 0
@@ -2002,6 +2015,7 @@ export function useCodexApiServicePageController() {
             accountIds,
             accounts,
             restrictFreeAccounts,
+            collection?.pausedAccountIds?.filter((id) => collection.accountIds.includes(id)),
           );
 
     if (accountIds.length > 0 && filteredAccountIds.length === 0) {
@@ -2026,9 +2040,10 @@ export function useCodexApiServicePageController() {
       restrictFreeAccounts,
       nextBackupAccountIds,
       nextPreferredAccountIds,
-      undefined,
-      undefined,
+      sessionAffinity,
+      sessionAffinityTtlMs,
       imageGenerationAccountPolicies,
+      officialAccountBindings,
     );
     setState(next);
     void fetchAccounts().catch((error) => {
@@ -2078,6 +2093,9 @@ export function useCodexApiServicePageController() {
     backupAccountIds?: string[],
     preferredAccountIds?: string[],
     imageGenerationAccountPolicies?: Record<string, CodexLocalAccessImageGenerationPolicy>,
+    officialAccountBindings?: Record<string, string>,
+    sessionAffinity?: boolean,
+    sessionAffinityTtlMs?: number,
   ) => {
     setBusy(true);
     setError("");
@@ -2089,6 +2107,9 @@ export function useCodexApiServicePageController() {
         backupAccountIds,
         preferredAccountIds,
         imageGenerationAccountPolicies,
+        officialAccountBindings,
+        sessionAffinity,
+        sessionAffinityTtlMs,
       );
       setNotice(t("codex.localAccess.saveSuccess", "API 服务集合已更新"));
     } catch (err) {
@@ -2128,9 +2149,9 @@ export function useCodexApiServicePageController() {
 
   const handleRemoveMember = async (accountId: string) => {
     if (!collection) return;
-    const remainingIds = collection.accountIds.filter(
-      (item) => item !== accountId,
-    );
+    const row = localAccessAccounts.find((account) => account.id === accountId);
+    const removedIds = new Set(row ? codexServiceRelatedEndpointIds(row, localAccessAccounts) : [accountId]);
+    const remainingIds = collection.accountIds.filter((item) => !removedIds.has(item));
     const remainingSet = new Set(remainingIds);
     const backupAccountIds = (collection.customRoutingRules ?? [])
       .filter((rule) => rule.isBackup && remainingSet.has(rule.accountId))

@@ -143,10 +143,16 @@
           "id": "priority",
           "name": "Fast",
           "description": "2x speed, increased usage"
+        },
+        {
+          "id": "ultrafast",
+          "name": "Ultrafast",
+          "description": "Fastest speed, highest usage"
         }
       ],
       "additional_speed_tiers": [
-        "fast"
+        "fast",
+        "ultrafast"
       ],
       "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
@@ -764,10 +770,16 @@
           "id": "priority",
           "name": "Fast",
           "description": "2x speed, increased usage"
+        },
+        {
+          "id": "ultrafast",
+          "name": "Ultrafast",
+          "description": "Fastest speed, highest usage"
         }
       ],
       "additional_speed_tiers": [
-        "fast"
+        "fast",
+        "ultrafast"
       ],
       "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
